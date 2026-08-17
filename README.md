@@ -20,3 +20,43 @@
 | nudge 提醒：连续 10 轮无写入提醒持久化 | ✅ 同 |
 | 成功结果：`memory(memory): Entry updated.` + usage + "do not repeat" | ✅ 同 |
 | 工具内部无 LLM（agent-curated 策展，零 LLM 成本） | ✅ 同 |
+
+## 🚀 Quick Start
+
+### 方式 A：dsh bundle 安装（推荐，部署级、重启自动加载）
+
+本仓库是标准 **dsh bundle**（`package.json` 声明 `dsh.bundle` + [`cordis.patch.yml`](cordis.patch.yml)），一行安装：
+
+```sh
+dsh plugin --profile web add github:isheng-eqi/dsh-hermes-memory
+# 或本地路径
+dsh plugin --profile web add /path/to/dsh-hermes-memory
+```
+
+安装后插件在**部署级**生效（所有会话可见）：模型获得 `memory` / `memory_search` / `memory_list` / `memory_stats` / `memory_debug` 工具，每个会话开始自动注入记忆冻结快照。
+
+### 方式 B：动态 Cordis 插件（进程级，无需改部署配置）
+
+在任意 DSH 会话中，让模型执行 `cordis_define`（Host 半边代码 = [`host.js`](host.js)，Client 半边 = [`client.js`](client.js)，额外带 Run 卡记忆面板）与 `cordis_run`。注意动态插件随进程退出而消失，重启后需重新运行（数据不丢）。
+
+### 使用
+
+直接对模型说"记住 XXX"即可；每个新会话开始会自动注入记忆快照。
+
+**数据存储**：`~/.dsh/storages/hermes_memory.json`（DSH storage hub 的 json 后端，原子写、人类可读、跨会话跨重启持久）。
+
+## 🛠 Tools
+
+### `memory`
+唯一的记忆写入入口，与 hermes-agent 契约一致：
+- `action`：`add` / `replace` / `remove` / `batch`（必填）
+- `target`：`memory`（默认，= MEMORY.md）/ `user`（= USER.md）
+- `content`：新增/替换条目文本
+- `oldText`：replace/remove 时的唯一子串匹配
+- `operations`：batch 时的操作数组（全有或全无，可在一次调用里腾空间+写入）
+
+### 辅助工具
+- `memory_search` — 确定性关键词检索两个记忆库
+- `memory_list` — 列出条目（按存储顺序）
+- `memory_stats` — 用量统计（`3% — 79/2,200 chars`）
+- `memory_debug` — 诊断存储句柄表与 store 状态
