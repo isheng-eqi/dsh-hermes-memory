@@ -1,0 +1,8 @@
+# dsh-hermes-memory — bundle patch: inserts the memory plugin row (deployment-global).
+- insert:
+    - id: hermes-memory
+      name: 'dsh-hermes-memory'
+      config:
+        memoryCharLimit: 2200
+        userCharLimit: 1375
+        nudgeInterval: 10
