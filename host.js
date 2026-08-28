@@ -214,10 +214,12 @@ return {
     }
 
     // ---------------- 合并协议 ----------------
-    function consolidationFailure(bank, response, sessionId) {
+    // 镜像 lib/core.js 的 consolidationFailure：'ui'（面板）不参与失败上限协议
+    const consolidationFailure = (failures, max, bank, response, sessionId) => {
+      if (sessionId === 'ui') return response
       const count = (failures.get(sessionId) || 0) + 1
       failures.set(sessionId, count)
-      if (count <= MAX_CONSOLIDATION_FAILURES) return response
+      if (count <= max) return response
       return {
         ...response,
         success: false,
@@ -237,7 +239,7 @@ return {
       for (let i = 0; i < operations.length; i++) {
         const problem = validateOperation(operations[i])
         if (problem !== null) {
-          return consolidationFailure(bank, {
+          return consolidationFailure(failures, MAX_CONSOLIDATION_FAILURES, bank, {
             success: false,
             target: bank,
             error: `Operation ${i + 1}: ${problem} No operations were applied (batch is all-or-nothing).`,
@@ -255,7 +257,7 @@ return {
         const op = operations[i]
         const failure = stepOperation(working, op, `Operation ${i + 1} (${op.action})`, seqCounter)
         if (failure !== null) {
-          return consolidationFailure(bank, {
+          return consolidationFailure(failures, MAX_CONSOLIDATION_FAILURES, bank, {
             success: false,
             target: bank,
             error: `${failure} No operations were applied (batch is all-or-nothing).`,
@@ -265,7 +267,7 @@ return {
         }
       }
       if (renderEntries(working.map((w) => w.text)).length > limit) {
-        return consolidationFailure(bank, {
+        return consolidationFailure(failures, MAX_CONSOLIDATION_FAILURES, bank, {
           success: false,
           target: bank,
           error: [
