@@ -1,4 +1,4 @@
-# 🧠 dsh-hermes-memory
+# dsh-hermes-memory
 
 > Hermes-style persistent memory for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH)
 > — a faithful port of the hermes-agent `MemoryStore` (`MEMORY.md` / `USER.md`) mechanism,
@@ -6,24 +6,24 @@
 
 **DeepSeek Harness 的 Hermes 式记忆管理插件**：MEMORY.md（Agent 个人笔记）+ USER.md（用户画像）双记忆库，由模型用一个 `memory` 工具自主策展，跨会话持久化，每个会话以冻结快照重新注入；同时提供**内置于 Web 界面的记忆面板**，让你直接看见并修改两个记忆库。忠实复刻 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) 的 `tools/memory_tool.py` 机制，零外部依赖、纯 DSH 原生接缝实现。
 
-## ✨ Features
+## Features
 
 | Hermes 机制 | 本插件实现 |
 |---|---|
-| `MEMORY.md` — agent 个人笔记（环境事实/项目约定/工具怪癖），**2200 字符上限** | ✅ `memory` 记忆库 |
-| `USER.md` — 用户画像（偏好/沟通风格/工作习惯），**1375 字符上限** | ✅ `user` 记忆库 |
-| 条目以 `§` 分隔、可多行，字符上限（非 token） | ✅ 同 |
-| 单个 `memory` 工具：`add` / `replace` / `remove` / `batch`（全有或全无） | ✅ 同 |
-| `replace`/`remove` 用唯一子串匹配 `old_text`，多条命中报冲突 | ✅ 同（精确匹配优先，UI 传完整文本永远唯一命中） |
-| 超限不静默丢弃：返回当前条目列表，模型当轮合并后重试；每轮失败上限 3 | ✅ 同 |
-| `add` 自动去重（同文本不重复） | ✅ 同 |
-| **冻结快照**：会话开始注入一次（`<system-reminder>` 框架 + `═` 标尺 + `[n% — x/limit chars]` 用量表头），会话中途写入不改已注入快照（保前缀缓存） | ✅ 同 |
-| nudge 提醒：连续 10 轮无写入提醒持久化 | ✅ 同 |
-| 成功结果：`memory(memory): Entry updated.` + usage + "do not repeat" | ✅ 同 |
-| 工具内部无 LLM（agent-curated 策展，零 LLM 成本） | ✅ 同 |
-| **记忆可视化面板**（Web UI 内查看/增/删/改两个记忆库） | ✅ 本插件独有（见下） |
+| `MEMORY.md` — agent 个人笔记（环境事实/项目约定/工具怪癖），**2200 字符上限** | ✓ `memory` 记忆库 |
+| `USER.md` — 用户画像（偏好/沟通风格/工作习惯），**1375 字符上限** | ✓ `user` 记忆库 |
+| 条目以 `§` 分隔、可多行，字符上限（非 token） | ✓ 同 |
+| 单个 `memory` 工具：`add` / `replace` / `remove` / `batch`（全有或全无） | ✓ 同 |
+| `replace`/`remove` 用唯一子串匹配 `old_text`，多条命中报冲突 | ✓ 同（精确匹配优先，UI 传完整文本永远唯一命中） |
+| 超限不静默丢弃：返回当前条目列表，模型当轮合并后重试；每轮失败上限 3 | ✓ 同 |
+| `add` 自动去重（同文本不重复） | ✓ 同 |
+| **冻结快照**：会话开始注入一次（`<system-reminder>` 框架 + `═` 标尺 + `[n% — x/limit chars]` 用量表头），会话中途写入不改已注入快照（保前缀缓存） | ✓ 同 |
+| nudge 提醒：连续 10 轮无写入提醒持久化 | ✓ 同 |
+| 成功结果：`memory(memory): Entry updated.` + usage + "do not repeat" | ✓ 同 |
+| 工具内部无 LLM（agent-curated 策展，零 LLM 成本） | ✓ 同 |
+| **记忆可视化面板**（Web UI 内查看/增/删/改两个记忆库） | ✓ 本插件独有（见下） |
 
-## 🖥 记忆面板（Memory Panel）
+## 记忆面板（Memory Panel）
 
 安装后，DSH Web 界面**侧边栏底部**会出现「记忆」入口，点击打开记忆面板：
 
@@ -56,7 +56,7 @@
 
 面板与模型 `memory` 工具读写**同一份存储**，两边看到的内容永远一致 —— 模型策展的记忆，你可以随时亲眼查看和修正。
 
-## 🚀 Quick Start
+## Quick Start
 
 ### 方式 A：dsh bundle 安装（推荐，部署级、重启自动加载）
 
@@ -82,7 +82,7 @@ dsh plugin --profile web add /path/to/dsh-hermes-memory
 - **自己看/改**：点击侧边栏「记忆」→ 面板直接查看、编辑、删除、添加条目
 - **数据存储**：`~/.dsh/storages/hermes_memory.json`（DSH storage hub 的 json 后端，原子写、人类可读、跨会话跨重启持久）
 
-## 🛠 Tools
+## Tools
 
 ### `memory`
 唯一的记忆写入入口，与 hermes-agent 契约一致：
@@ -98,7 +98,7 @@ dsh plugin --profile web add /path/to/dsh-hermes-memory
 - `memory_stats` — 用量统计（`3% — 79/2,200 chars`）
 - `memory_debug` — 诊断存储句柄表与 store 状态
 
-## 🔬 Architecture
+## Architecture
 
 ```
 ┌────────────────────────────────────────────────────────────┐
@@ -137,7 +137,7 @@ dsh plugin --profile web add /path/to/dsh-hermes-memory
   ```
   条目内 `</system-reminder>` 被转义，文件内容无法破坏框架。
 
-## 📋 Design Decisions（与 Hermes 原版的差异）
+## Design Decisions（与 Hermes 原版的差异）
 
 - **存储介质**：Hermes 用 `~/.hermes/memories/*.md` 文件 + 文件锁/原子 rename；本插件改用 DSH 原生 json 存储单元（本身原子写、版本化、人类可读），单进程内无需文件锁。
 - **注入载体**：Hermes 注入系统提示词；本插件经 `agent/pre-step` 注入 durable user 消息（source `{kind:'plugin', plugin:'hermes-memory'}`），会话日志可重建（model-visible ⟺ logged）。
@@ -146,10 +146,10 @@ dsh plugin --profile web add /path/to/dsh-hermes-memory
 - **可视化面板**：Hermes 无 UI；本插件用 DSH 原生 slot（`sidebar.footer.action` / `shell.overlay`）+ webServer 路由实现浏览器面板，零前端依赖、零构建步骤。
 - **未实现**（与社区移植版一致）：`write_approval` 审批门、提示注入安全扫描（信任度与 AGENTS.md 相同）、`session_search`（Hermes 用 SQLite FTS5 检索会话历史；DSH 原生 `sessionQuery` 可作后续接入点）。
 
-## 📦 社区收录
+## 社区收录
 
 本插件为 DSH 社区生态的一部分。已收录于 [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)。
 
-## 📄 License
+## License
 
 MIT
