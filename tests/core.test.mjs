@@ -70,6 +70,34 @@ test('stepOperation: 子串命中多条不同条目时报冲突', () => {
   assert.ok(err && err.includes('matched multiple distinct entries'))
 })
 
+test('stepOperation: 精确匹配优先——完整文本恰为其他条目的子串时仍唯一命中', () => {
+  // 回归：条目 "11" 的文本是其他条目（"PR #1288"、"11 commits"）的子串，
+  // 旧实现按子串匹配报冲突，导致 UI 无法删除/编辑该条目
+  const w = working(['PR #1288 merged', '11 commits', '11'])
+  assert.equal(stepOperation(w, { action: 'remove', oldText: '11' }, 'op', { next: 4 }), null)
+  assert.equal(w.length, 2)
+  assert.ok(!w.some((e) => e.text === '11'))
+  assert.ok(w.some((e) => e.text === 'PR #1288 merged'))
+  assert.ok(w.some((e) => e.text === '11 commits'))
+})
+
+test('stepOperation: 精确匹配优先同样作用于 replace 且保留 seq', () => {
+  const w = working(['11', 'PR #1288 merged'])
+  const before = w[0]
+  assert.equal(stepOperation(w, { action: 'replace', oldText: '11', content: '更新后' }, 'op', { next: 3 }), null)
+  assert.equal(w[0].text, '更新后')
+  assert.equal(w[0].seq, before.seq)
+  assert.equal(w.length, 2)
+})
+
+test('stepOperation: 无精确命中时仍回退子串语义（模型工具行为不变）', () => {
+  const w = working(['alpha', 'beta'])
+  // 'al' 无精确命中 → 子串匹配唯一命中 alpha
+  assert.equal(stepOperation(w, { action: 'remove', oldText: 'al' }, 'op', { next: 3 }), null)
+  assert.equal(w.length, 1)
+  assert.ok(w[0].text === 'beta')
+})
+
 test('stepOperation: replace 唯一匹配替换且保留 seq', () => {
   const w = working(['旧内容', '其他'])
   const before = w[0]
