@@ -27,7 +27,9 @@
 
 安装后，DSH Web 界面**侧边栏底部**会出现「记忆」入口，点击打开记忆面板：
 
-![记忆面板](docs/panel.png)
+![记忆面板](docs/panel-1.png)
+
+![记忆面板编辑](docs/panel-2.png)
 
 ### 功能
 
