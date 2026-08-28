@@ -27,9 +27,9 @@
 
 安装后，DSH Web 界面**侧边栏底部**会出现「记忆」入口，点击打开记忆面板：
 
-![记忆面板](https://cdn.jsdelivr.net/gh/isheng-eqi/dsh-hermes-memory@main/docs/panel-1.png)
+![记忆面板](https://cdn.jsdelivr.net/gh/isheng-eqi/dsh-hermes-memory@5cf56dd3c583ba1de2de5a69135255865e95d4d8/docs/panel-1.png)
 
-![记忆面板编辑](https://cdn.jsdelivr.net/gh/isheng-eqi/dsh-hermes-memory@main/docs/panel-2.png)
+![记忆面板编辑](https://cdn.jsdelivr.net/gh/isheng-eqi/dsh-hermes-memory@5cf56dd3c583ba1de2de5a69135255865e95d4d8/docs/panel-2.png)
 
 ### 功能
 
