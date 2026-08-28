@@ -39,6 +39,8 @@ dsh plugin --profile web add /path/to/dsh-hermes-memory
 
 在任意 DSH 会话中，让模型执行 `cordis_define`（Host 半边代码 = [`host.js`](host.js)，Client 半边 = [`client.js`](client.js)，额外带 Run 卡记忆面板）与 `cordis_run`。注意动态插件随进程退出而消失，重启后需重新运行（数据不丢）。
 
+> 动态形态无配置通道：字符上限与 nudge 间隔为硬编码（2200/1375/10），与 bundle 形态默认值一致；如需调整请使用方式 A。
+
 ### 使用
 
 直接对模型说"记住 XXX"即可；每个新会话开始会自动注入记忆快照。
