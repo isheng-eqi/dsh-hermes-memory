@@ -16,6 +16,7 @@
  *  - 额外提供 harness.handle('mem-stats') 供 Client 面板 RPC
  */
 return {
+  inject: ['timer'], // 面板路由轮询等待 webServer 所需
   apply(ctx) {
     // ---------------- 常量与状态 ----------------
     const BANKS = ['memory', 'user']
@@ -604,8 +605,9 @@ return {
     }))
 
     // ---------------- 太极面板 HTTP API（与 lib/index.js 镜像） ----------------
-    const ws = ctx.get('webServer')
-    if (ws !== undefined) {
+    // 沙箱 ctx 无 ctx.wait：webServer 可能晚于本插件激活，用 timer 轮询等待
+    //（TUI 模式无 webServer，30 次后放弃，无副作用）。需 inject: ['timer']。
+    const registerPanelRoutes = (wsrv) => {
       const json = (res, code, value) => {
         res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' })
         res.end(JSON.stringify(value))
@@ -618,7 +620,7 @@ return {
         }
         return raw
       }
-      ctx.effect(() => ws.register({
+      ctx.effect(() => wsrv.register({
         kind: 'exact',
         path: '/hermes-memory/stats',
         handler: async (_req, res) => {
@@ -638,7 +640,7 @@ return {
           })
         },
       }))
-      ctx.effect(() => ws.register({
+      ctx.effect(() => wsrv.register({
         kind: 'exact',
         path: '/hermes-memory/ops',
         handler: async (req, res) => {
@@ -663,6 +665,23 @@ return {
           }
         },
       }))
+    }
+    // 沙箱 ctx 无 ctx.wait：轮询等待 webServer（webServer 激活链依赖 webStartup，可能晚于本插件）
+    const ws0 = ctx.get('webServer')
+    if (ws0 !== undefined) {
+      registerPanelRoutes(ws0)
+    } else {
+      let tries = 0
+      const stop = ctx.interval(() => {
+        tries += 1
+        const s = ctx.get('webServer')
+        if (s !== undefined) {
+          stop()
+          registerPanelRoutes(s)
+        } else if (tries >= 30) {
+          stop()
+        }
+      }, 1000)
     }
   },
 }
