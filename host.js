@@ -1,24 +1,36 @@
 /**
- * Hermes 式记忆管理 v5 —— 在 v4 忠实复刻基础上：
- *  1) 自愈：open 撞 "already open" 时，找到后端句柄表中的僵尸单元并关闭后重试（解决
- *     更新/重启后旧纤维句柄泄漏导致存储永久锁死的问题）
- *  2) disposer 返回 Promise，让 Cordis 纤维销毁时等待 close() 完成（消除关闭竞态）
- *  3) 新增 memory_debug 工具：暴露后端 open/opening 表的真实状态，便于诊断
+ * Hermes 式记忆管理 —— DSH 动态 Cordis 插件（Host 半边）
+ *
+ * 与 lib/index.js（静态 bundle 权威实现）同步的镜像。本文件运行在
+ * node:vm sandbox 中，无法 import lib/core.js / lib/index.js，因此
+ * 合并协议等纯逻辑在此闭包内复制了一份。
+ *
+ * ⚠️ 同步声明：改 lib/core.js 或 lib/index.js 的合并协议/注入逻辑时，
+ * 必须同步修改本文件对应代码（两形态行为必须一致）。
+ *
+ * 差异（有意为之）：
+ *  - 工具注册：harness.defineTool + harness.registerTool（动态 builtin）
+ *  - 配置：硬编码 2200/1375/10（动态插件无 Config 通道）
+ *  - source.plugin：'hermes-memory'（isOurMessage 同时兼容静态版
+ *    'dsh-hermes-memory'，避免已注入快照被重复注入）
+ *  - 额外提供 harness.handle('mem-stats') 供 Client 面板 RPC
  */
 return {
   apply(ctx) {
     // ---------------- 常量与状态 ----------------
     const BANKS = ['memory', 'user']
-    const LIMITS = { memory: 2200, user: 1375 }
+    const LIMITS = { memory: 2200, user: 1375 } // 动态形态无 Config，硬编码 hermes 默认值
+    const NUDGE_INTERVAL = 10
     const ENTRY_DELIMITER = '\n§\n'
     const MAX_CONSOLIDATION_FAILURES = 3
-    const NUDGE_INTERVAL = 10
     const MARKER_SNAPSHOT = '<hermes-memory-snapshot>'
     const MARKER_NUDGE = '<hermes-memory-nudge>'
     const RULER = '═'.repeat(46)
     const SYSTEM_REMINDER_OPEN = '<system-reminder>'
     const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
     const HEADERS = { memory: 'MEMORY (your personal notes)', user: 'USER PROFILE (who the user is)' }
+    /** 兼容静态版（lib/index.js）消息的 source.plugin 值。 */
+    const PLUGIN_IDS = ['hermes-memory', 'dsh-hermes-memory']
 
     const store = {
       unit: null,
@@ -29,18 +41,67 @@ return {
       error: null,
       openAttempts: 0,
     }
-    const failures = new Map()
+    const failures = new Map() // sessionId -> consolidation failure count this turn
+    const lastNudgeTurn = new Map() // sessionId -> turn of the last injected nudge
+    let lastOpenAttemptAt = 0 // 节流：存储重试间隔（ms）
 
-    // ---------------- 工具函数 ----------------
+    // ---------------- 纯函数（与 lib/core.js 逐行对应） ----------------
     const str = (v) => (v === undefined || v === null ? '' : String(v))
     const now = () => new Date().toISOString()
+    const escapeFrame = (text) => String(text)
+      .replaceAll(SYSTEM_REMINDER_OPEN, '<\\system-reminder>')
+      .replaceAll(SYSTEM_REMINDER_CLOSE, '<\\/system-reminder>')
+    const renderEntries = (entries) => entries.join(ENTRY_DELIMITER)
+    const slugKey = (text) => {
+      let h = 2166136261
+      for (let i = 0; i < text.length; i++) h = (h ^ text.charCodeAt(i)) * 16777619 >>> 0
+      const stem = text.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32) || 'e'
+      return `${stem}-${h.toString(36).slice(0, 6)}`
+    }
+    const validateOperation = (op) => {
+      const content = str(op.content).trim()
+      const oldText = str(op.oldText).trim()
+      if (op.action === 'add') {
+        if (content === '') return 'content is required.'
+      } else {
+        if (oldText === '') return 'old_text is required.'
+        if (op.action === 'replace' && content === '') {
+          return "content is required (use action='remove' to delete)."
+        }
+      }
+      return null
+    }
+    // seqCounter: { next } 局部序号计数器 —— 失败回滚不污染全局 seq（#7）
+    const stepOperation = (working, op, pos, seqCounter) => {
+      const content = str(op.content).trim()
+      const oldText = str(op.oldText).trim()
+      if (op.action === 'add') {
+        if (!working.some((e) => e.text === content)) {
+          working.push({ text: content, seq: seqCounter.next++, createdAt: now(), updatedAt: now() })
+        }
+        return null
+      }
+      const matches = working
+        .map((entry, index) => ({ entry, index }))
+        .filter((c) => c.entry.text.includes(oldText))
+      if (matches.length === 0) return `${pos}: no entry matched '${oldText}'.`
+      if (new Set(matches.map((m) => m.entry.text)).size > 1) {
+        return `${pos}: '${oldText}' matched multiple distinct entries — be more specific.`
+      }
+      if (op.action === 'replace') {
+        working[matches[0].index] = { ...working[matches[0].index], text: content, updatedAt: now() }
+      } else {
+        working.splice(matches[0].index, 1)
+      }
+      return null
+    }
+
+    // ---------------- 非纯辅助 ----------------
     const enqueue = (task) => {
       const p = store.chain.then(task)
       store.chain = p.catch(() => {})
       return p
     }
-    const escapeFrame = (text) => text.replaceAll(SYSTEM_REMINDER_CLOSE, '<\\/system-reminder>')
-    const renderEntries = (entries) => entries.join(ENTRY_DELIMITER)
     const entriesOf = (bank) => [...store.tables[bank].values()].sort((a, b) => a.seq - b.seq).map((r) => r.text)
     const charCount = (bank) => renderEntries(entriesOf(bank)).length
     const usageLine = (bank) => {
@@ -48,12 +109,6 @@ return {
       const limit = LIMITS[bank]
       const pct = limit > 0 ? Math.min(100, Math.floor((current / limit) * 100)) : 0
       return `${pct}% — ${current.toLocaleString()}/${limit.toLocaleString()} chars`
-    }
-    const slugKey = (text) => {
-      let h = 2166136261
-      for (let i = 0; i < text.length; i++) h = (h ^ text.charCodeAt(i)) * 16777619 >>> 0
-      const stem = text.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32) || 'e'
-      return `${stem}-${h.toString(36).slice(0, 6)}`
     }
     const storageBackend = () => {
       const storage = ctx.get('storage')
@@ -140,43 +195,7 @@ return {
       })
     }
 
-    // ---------------- 合并协议（忠实移植 hermes MemoryStore） ----------------
-    function validateOperation(op) {
-      const content = str(op.content).trim()
-      const oldText = str(op.oldText).trim()
-      if (op.action === 'add') {
-        if (content === '') return 'content is required.'
-      } else {
-        if (oldText === '') return 'old_text is required.'
-        if (op.action === 'replace' && content === '') {
-          return "content is required (use action='remove' to delete)."
-        }
-      }
-      return null
-    }
-    function stepOperation(working, op, pos) {
-      const content = str(op.content).trim()
-      const oldText = str(op.oldText).trim()
-      if (op.action === 'add') {
-        if (!working.some((e) => e.text === content)) {
-          working.push({ text: content, seq: ++store.seq[working.bank], createdAt: now(), updatedAt: now() })
-        }
-        return null
-      }
-      const matches = working
-        .map((entry, index) => ({ entry, index }))
-        .filter((c) => c.entry.text.includes(oldText))
-      if (matches.length === 0) return `${pos}: no entry matched '${oldText}'.`
-      if (new Set(matches.map((m) => m.entry.text)).size > 1) {
-        return `${pos}: '${oldText}' matched multiple distinct entries — be more specific.`
-      }
-      if (op.action === 'replace') {
-        working[matches[0].index] = { ...working[matches[0].index], text: content, updatedAt: now() }
-      } else {
-        working.splice(matches[0].index, 1)
-      }
-      return null
-    }
+    // ---------------- 合并协议 ----------------
     function consolidationFailure(bank, response, sessionId) {
       const count = (failures.get(sessionId) || 0) + 1
       failures.set(sessionId, count)
@@ -213,9 +232,10 @@ return {
       const recs = [...store.tables[bank].values()].sort((a, b) => a.seq - b.seq)
       const working = recs.map((r) => ({ text: r.text, seq: r.seq, createdAt: r.createdAt, updatedAt: r.updatedAt }))
       working.bank = bank
+      const seqCounter = { next: store.seq[bank] + 1 } // 局部计数器（#7）
       for (let i = 0; i < operations.length; i++) {
         const op = operations[i]
-        const failure = stepOperation(working, op, `Operation ${i + 1} (${op.action})`)
+        const failure = stepOperation(working, op, `Operation ${i + 1} (${op.action})`, seqCounter)
         if (failure !== null) {
           return consolidationFailure(bank, {
             success: false,
@@ -254,6 +274,7 @@ return {
         if (t.kind === 'del') await deleteRecord(t.bank, t.key)
         else await putRecord(t.bank, t.key, t.record)
       }
+      store.seq[bank] = seqCounter.next - 1 // 提交成功：写回全局 seq
       failures.delete(sessionId)
       return {
         success: true,
@@ -266,7 +287,7 @@ return {
       }
     }
 
-    // ---------------- 工具 ----------------
+    // ---------------- 工具注册 ----------------
     function defineTool(name, description, parameters, renderText, execute) {
       return harness.defineTool({
         name,
@@ -427,7 +448,7 @@ return {
       },
     )))
 
-    // memory_debug —— 诊断工具
+    // memory_debug —— 诊断工具（开发期排查句柄/存储状态用）
     ctx.effect(() => harness.registerTool(ctx, defineTool(
       'memory_debug',
       'Diagnostic: report the storage backend handle-table state and this plugin store state for the hermes_memory unit.',
@@ -463,7 +484,7 @@ return {
     function isOurMessage(event) {
       if (!event || event.type !== 'user/message') return false
       const source = event.data && event.data.source
-      if (!source || source.kind !== 'plugin' || source.plugin !== 'hermes-memory') return false
+      if (!source || source.kind !== 'plugin' || !PLUGIN_IDS.includes(source.plugin)) return false
       const blocks = event.data.content
       if (!Array.isArray(blocks)) return false
       return blocks.some((b) => b && b.type === 'text' && typeof b.text === 'string' && b.text.includes(MARKER_SNAPSHOT))
@@ -534,18 +555,33 @@ return {
       const messages = []
       try {
         const events = agent.session.events
+        // #6：存储未就绪时节流重试（30s 间隔），避免首次 open 失败后快照永久缺失
+        if (!store.ready) {
+          const t = Date.now()
+          if (t - lastOpenAttemptAt > 30000) {
+            lastOpenAttemptAt = t
+            ensureReady().catch(() => {})
+          }
+        }
         if (store.ready && !hasVisibleMemorySnapshot(events)) {
           const text = renderSnapshotMessage()
           if (text !== '') messages.push(makeMessage(text))
         }
-        if (NUDGE_INTERVAL > 0 && turnsSinceMemoryWrite(events) >= NUDGE_INTERVAL) {
-          messages.push(makeMessage(renderNudgeMessage()))
+        // #2：nudge 去重 —— 同一会话每隔 NUDGE_INTERVAL 轮才提醒一次
+        if (NUDGE_INTERVAL > 0) {
+          const lastN = lastNudgeTurn.get(sessionId)
+          if ((lastN === undefined || payload.turn - lastN >= NUDGE_INTERVAL) && turnsSinceMemoryWrite(events) >= NUDGE_INTERVAL) {
+            messages.push(makeMessage(renderNudgeMessage()))
+            lastNudgeTurn.set(sessionId, payload.turn)
+          }
         }
       } catch (e) {
         console.error('[hermes-memory] pre-step fold failed:', e)
       }
       if (messages.length === 0) return decision
-      return { kind: 'enter', messages: [...decision.messages, ...messages] }
+      // #10：防御 —— enter 决策消息数组判空
+      const base = Array.isArray(decision.messages) ? decision.messages : []
+      return { kind: 'enter', messages: [...base, ...messages] }
     })
 
     // ---------------- Client 面板 RPC ----------------
