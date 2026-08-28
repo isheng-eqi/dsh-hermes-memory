@@ -1,17 +1,20 @@
 {
   "name": "dsh-hermes-memory",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Hermes-style persistent memory for DeepSeek Harness (DSH) — a faithful port of the hermes-agent MEMORY.md / USER.md mechanism: bounded dual-bank memory, one `memory` tool (add/replace/remove/batch), frozen-snapshot injection, nudge reminders. Zero external dependencies, zero LLM cost.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
+    "./core": "./lib/core.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "files": [
     "lib",
     "cordis.patch.yml",
+    "host.js",
+    "client.js",
     "README.md",
     "LICENSE"
   ],
@@ -29,6 +32,9 @@
   "author": "isheng-eqi",
   "engines": {
     "node": "^22.19 || >=24"
+  },
+  "scripts": {
+    "test": "node tests/core.test.mjs"
   },
   "dsh": {
     "bundle": {
