@@ -71,6 +71,17 @@ return {
       }
       return null
     }
+    // memory_list 渲染：value 只含请求的库，缺失/空库跳过（回归：单库曾读 undefined.length 崩溃）
+    const renderBankList = (value, banks, headers) => {
+      const lines = []
+      for (const bank of banks) {
+        const entries = value[bank]
+        if (!Array.isArray(entries) || entries.length === 0) continue
+        lines.push(`${headers[bank]} [${value.usage[bank]}]`)
+        for (const e of entries.slice(0, value.limit)) lines.push(`- ${e}`)
+      }
+      return lines.length ? lines.join('\n') : 'Memory is empty.'
+    }
     // seqCounter: { next } 局部序号计数器 —— 失败回滚不污染全局 seq（#7）
     const stepOperation = (working, op, pos, seqCounter) => {
       const content = str(op.content).trim()
@@ -410,16 +421,7 @@ return {
         target: { type: 'string', enum: ['memory', 'user'], description: 'Bank to list; default both.' },
         limit: { type: 'number', description: 'Max entries per bank (1-100, default 50).' },
       },
-      (v) => {
-        const lines = []
-        for (const bank of BANKS) {
-          const entries = v[bank]
-          if (entries.length === 0) continue
-          lines.push(`${HEADERS[bank]} [${v.usage[bank]}]`)
-          for (const e of entries.slice(0, v.limit)) lines.push(`- ${e}`)
-        }
-        return lines.length ? lines.join('\n') : 'Memory is empty.'
-      },
+      (v) => renderBankList(v, BANKS, HEADERS),
       async (args, _exec) => {
         await ensureReady()
         const limit = Math.max(1, Math.min(args.limit || 50, 100))
