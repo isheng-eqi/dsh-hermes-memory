@@ -93,9 +93,15 @@ return {
         }
         return null
       }
-      const matches = working
+      // 精确匹配优先（UI 传完整文本时永远唯一命中），无命中回退子串语义
+      let matches = working
         .map((entry, index) => ({ entry, index }))
-        .filter((c) => c.entry.text.includes(oldText))
+        .filter((c) => c.entry.text === oldText)
+      if (matches.length === 0) {
+        matches = working
+          .map((entry, index) => ({ entry, index }))
+          .filter((c) => c.entry.text.includes(oldText))
+      }
       if (matches.length === 0) return `${pos}: no entry matched '${oldText}'.`
       if (new Set(matches.map((m) => m.entry.text)).size > 1) {
         return `${pos}: '${oldText}' matched multiple distinct entries — be more specific.`
