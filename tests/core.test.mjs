@@ -8,6 +8,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   ENTRY_DELIMITER,
+  consolidationFailure,
   escapeFrame,
   renderBankList,
   renderEntries,
@@ -142,6 +143,32 @@ test('renderBankList: 单库查询（另一库缺失）不再崩溃', () => {
   assert.ok(!out.includes('MEMORY'))
   // 空库
   assert.equal(renderBankList({ usage: {}, limit: 50 }, ['memory', 'user'], headers), 'Memory is empty.')
+})
+
+// ---------------- consolidationFailure ----------------
+test('consolidationFailure: 面板（ui）不参与失败上限协议', () => {
+  const failures = new Map()
+  const payload = { success: false, target: 'memory', error: '原始错误' }
+  // 连续失败 4 次以上，面板始终看到原始错误，计数不增长
+  for (let i = 0; i < 6; i++) {
+    const out = consolidationFailure(failures, 3, 'memory', payload, 'ui')
+    assert.equal(out, payload)
+    assert.ok(!String(out.error).includes('Memory consolidation failed'))
+  }
+  assert.equal(failures.has('ui'), false)
+})
+
+test('consolidationFailure: 模型会话第 4 次失败返回停止重试文案', () => {
+  const failures = new Map()
+  const payload = { success: false, target: 'memory', error: '原始错误' }
+  for (let i = 1; i <= 3; i++) {
+    const out = consolidationFailure(failures, 3, 'memory', payload, 'sess-1')
+    assert.equal(out, payload, `第 ${i} 次失败应返回原始错误`)
+  }
+  const out = consolidationFailure(failures, 3, 'memory', payload, 'sess-1')
+  assert.ok(String(out.error).includes('Memory consolidation failed 4 times this turn.'))
+  assert.ok(String(out.error).includes('Stop retrying memory calls'))
+  assert.equal(out.done, true)
 })
 
 // ---------------- slugKey ----------------
