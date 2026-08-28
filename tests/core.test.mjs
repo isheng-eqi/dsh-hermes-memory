@@ -9,6 +9,7 @@ import assert from 'node:assert/strict'
 import {
   ENTRY_DELIMITER,
   escapeFrame,
+  renderBankList,
   renderEntries,
   slugKey,
   stepOperation,
@@ -101,6 +102,18 @@ test('escapeFrame: 转义闭合标签（防逃逸）与开标签（防误导）'
 test('renderEntries: 以 § 分隔符连接', () => {
   assert.equal(renderEntries(['a', 'b']), `a${ENTRY_DELIMITER}b`)
   assert.equal(renderEntries([]), '')
+})
+
+// ---------------- renderBankList ----------------
+test('renderBankList: 单库查询（另一库缺失）不再崩溃', () => {
+  const headers = { memory: 'MEMORY (your personal notes)', user: 'USER PROFILE (who the user is)' }
+  // 回归：target=user 时 value 不含 memory 键，旧实现读 undefined.length 崩溃
+  const out = renderBankList({ usage: { user: '1% — 10/1375 chars' }, user: ['条目A'], limit: 50 }, ['memory', 'user'], headers)
+  assert.match(out, /USER PROFILE/)
+  assert.match(out, /条目A/)
+  assert.ok(!out.includes('MEMORY'))
+  // 空库
+  assert.equal(renderBankList({ usage: {}, limit: 50 }, ['memory', 'user'], headers), 'Memory is empty.')
 })
 
 // ---------------- slugKey ----------------
