@@ -1,6 +1,6 @@
 {
   "name": "dsh-hermes-memory",
-  "version": "1.1.8",
+  "version": "1.1.9",
   "description": "Hermes-style persistent memory for DeepSeek Harness (DSH) — a faithful port of the hermes-agent MEMORY.md / USER.md mechanism: bounded dual-bank memory, one `memory` tool (add/replace/remove/batch), frozen-snapshot injection, nudge reminders, restrained monochrome web panel. Zero external dependencies, zero LLM cost.",
   "type": "module",
   "main": "lib/index.js",
@@ -60,5 +60,10 @@
     "@deepseek-ai/cordis": ">=4.0.0 <5.0.0",
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.6 <0.2.0",
     "@deepseek-ai/schemastery": ">=3.0.0 <4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": { "optional": true },
+    "@deepseek-ai/dsh-tools": { "optional": true },
+    "@deepseek-ai/schemastery": { "optional": true }
   }
 }
