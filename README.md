@@ -1,10 +1,20 @@
 # dsh-hermes-memory
 
-> Hermes-style persistent memory for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH)
-> — a faithful port of the hermes-agent `MemoryStore` (`MEMORY.md` / `USER.md`) mechanism,
-> plus a **built-in memory visualization panel** in the DSH web UI.
+> Persistent memory for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) that keeps
+> **two separate banks** — `MEMORY.md` for what the agent learns about the world, `USER.md` for what it learns about *you* —
+> plus a **built-in web panel** to inspect and edit both.
 
-**DeepSeek Harness 的 Hermes 式记忆管理插件**：MEMORY.md（Agent 个人笔记）+ USER.md（用户画像）双记忆库，由模型用一个 `memory` 工具自主策展，跨会话持久化，每个会话以冻结快照重新注入；同时提供**内置于 Web 界面的记忆面板**，让你直接看见并修改两个记忆库。忠实复刻 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) 的 `tools/memory_tool.py` 机制，零外部依赖、纯 DSH 原生接缝实现。
+**DeepSeek Harness 的双库记忆插件**：把 agent 的记忆分成两个独立的库——MEMORY.md（关于世界的事实：环境、项目约定、工具怪癖）和 USER.md（关于你的画像：偏好、沟通风格、工作习惯），各自独立预算、独立淘汰。模型用一个 `memory` 工具自主策展，跨会话持久化，每个会话以冻结快照重新注入；附带**内置网页面板**，直接查看和修改两个记忆库。机制源自 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) 的 `MemoryStore`，零外部依赖、纯 DSH 原生接缝实现。
+
+## 为什么分两个库
+
+大多数 agent 记忆方案把什么都装进一个池子——用户画像和项目事实、快变和慢变的信息混在一起。三个后果：
+
+- **抢预算**：一个字符上限的池子里，"用户喜欢简洁回答"和"这个项目的构建命令"互相挤占，谁该留谁该删没有依据。
+- **淘汰一刀切**：用户画像是慢变的（几个月不变），项目事实是快变的（每次迭代都更新），单库只能给两类信息套同一个淘汰策略。
+- **策展互相干扰**：模型决定"该记什么"时，关于你的信息和关于代码的信息搅在一起，两类判断互相污染。
+
+Hermes 的答案是分开：两个独立的库，各自的上限、各自的淘汰节奏。本插件把这个设计忠实落到 DSH。
 
 ## Features
 
