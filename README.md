@@ -74,11 +74,29 @@ Hermes 的答案是分开：两个独立的库，各自的上限、各自的淘�
 
 ```sh
 dsh plugin --profile web add github:isheng-eqi/dsh-hermes-memory
+# 或 npm 源（走 registry CDN，通常更快更稳）
+dsh plugin --profile web add dsh-hermes-memory
 # 或本地路径
 dsh plugin --profile web add /path/to/dsh-hermes-memory
 ```
 
 安装后插件在**部署级**生效（所有会话可见）：模型获得 `memory` / `memory_search` / `memory_list` / `memory_stats` / `memory_debug` 工具，每个会话开始自动注入记忆冻结快照，Web 界面侧边栏出现「记忆」面板入口。
+
+> 存储行归属说明：json storage 三行（`storage` / `storage-json` / `storage-domain`）是**宿主表面自带的组合**——web bundle 默认携带；headless / TUI / 自定义 profile（`dsh plugin --profile <名字> add` 初始化为 base-only）默认**没有**，且 bundle 层不允许重复声明相同行 id（会报 `duplicate loader entry id` 启动失败），所以本插件 patch 不含这些行。在无 storage 的 profile 上插件仍会挂载并打一次启动警告，但写入/快照不可用；如需启用，把下面三行加到该 profile 自己的 `cordis.patch.yml`（web profile 无需）：
+
+```yaml
+- insert:
+    - id: storage
+      name: '@deepseek-ai/dsh-storage'
+    - id: storage-json
+      name: '@deepseek-ai/dsh-storage-json'
+      config:
+        root: !!js dshHomePath('storages')
+    - id: storage-domain
+      name: '@deepseek-ai/dsh-storage-domain'
+      config:
+        backend: json
+```
 
 ### 方式 B：动态 Cordis 插件（进程级，无需改部署配置）
 

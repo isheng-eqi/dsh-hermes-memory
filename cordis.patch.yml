@@ -1,4 +1,15 @@
 # dsh-hermes-memory — bundle patch: inserts the memory plugin row (deployment-global).
+#
+# NOTE: do NOT re-declare the storage rows here. The web bundle
+# (@deepseek-ai/dsh-web-app) already ships `storage` / `storage-json` /
+# `storage-domain` with those exact ids, and cordis' insert semantics REJECT
+# duplicate loader entry ids — it does NOT "replace with identical values".
+# Declaring them again crashes `dsh web` with:
+#   "duplicate loader entry id: storage"
+#
+# The plugin only *consumes* storage via ctx.get('storage'); it does not need to
+# provide it. A profile with no storage stack (e.g. headless over dsh-base) must
+# add the storage rows in its own profile-level cordis.patch.yml — not here.
 - insert:
     - id: hermes-memory
       name: 'dsh-hermes-memory'
