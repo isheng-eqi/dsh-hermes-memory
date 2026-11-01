@@ -33,7 +33,7 @@ Hermes 的答案是分开：两个独立的库，各自的上限、各自的淘�
 | 工具内部无 LLM（agent-curated 策展，零 LLM 成本） | ✓ 同 |
 | **记忆可视化面板**（Web UI 内查看/增/删/改两个记忆库） | ✓ 本插件独有（见下） |
 
-> 更新于 2025-06-03（Dsh 更新后修复 `dsh-hermes-memory` 面板消失的问题，更新 profile 管理器目录，同步插件仓库）
+> 更新于 2026-11-01（DSH 更新后修复 `dsh-hermes-memory` 面板消失的问题，更新 profile 管理器目录，同步插件仓库）
 
 ## 记忆面板（Memory Panel）
 
