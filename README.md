@@ -84,6 +84,8 @@ dsh plugin --profile web add /path/to/dsh-hermes-memory
 
 安装后插件在**部署级**生效（所有会话可见）：模型获得 `memory` / `memory_search` / `memory_list` / `memory_stats` / `memory_debug` 工具，每个会话开始自动注入记忆冻结快照，Web 界面侧边栏出现「记忆」面板入口。
 
+> **DSH 0.2.x 兼容（1.1.11 起）**：peer 要求放宽为 `@deepseek-ai/dsh-tools >=0.1.0-rc.6 <0.3.0-0`（旧版声明 `<0.2.0` 会被 0.2.1 直接判定不兼容并**跳过整个 bundle**，面板随之消失）；客户端半边改用 `slots.register()`，因为 0.2.x 的 `SlotRegistry` 已移除 `inject()`。升级 dsh 后如面板消失，先看 `dsh --profile web --dump-config` 是否报 `skipping profile bundle`。
+
 > 存储行归属说明：json storage 三行（`storage` / `storage-json` / `storage-domain`）是**宿主表面自带的组合**——web bundle 默认携带；headless / TUI / 自定义 profile（`dsh plugin --profile <名字> add` 初始化为 base-only）默认**没有**，且 bundle 层不允许重复声明相同行 id（会报 `duplicate loader entry id` 启动失败），所以本插件 patch 不含这些行。在无 storage 的 profile 上插件仍会挂载并打一次启动警告，但写入/快照不可用；如需启用，把下面三行加到该 profile 自己的 `cordis.patch.yml`（web profile 无需）：
 
 ```yaml
