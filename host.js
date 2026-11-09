@@ -21,6 +21,7 @@ return {
     // ---------------- 常量与状态 ----------------
     const BANKS = ['memory', 'user']
     const LIMITS = { memory: 2200, user: 1375 } // 动态形态无 Config，硬编码 hermes 默认值
+    const CONTENT_GUARD = true
     const NUDGE_INTERVAL = 10
     const ENTRY_DELIMITER = '\n§\n'
     const MAX_CONSOLIDATION_FAILURES = 3
@@ -39,11 +40,14 @@ return {
       seq: { memory: 0, user: 0 },
       chain: Promise.resolve(),
       ready: false,
+      disposed: false,
       error: null,
       openAttempts: 0,
     }
     const failures = new Map() // sessionId -> consolidation failure count this turn
-    const lastNudgeTurn = new Map() // sessionId -> turn of the last injected nudge
+    const lastNudgeTurn = new Map()
+    const lastWriteEventCount = new Map()
+    const activeSessionEventCount = new Map() // sessionId -> turn of the last injected nudge
     let lastOpenAttemptAt = 0 // 节流：存储重试间隔（ms）
 
     // ---------------- 纯函数（与 lib/core.js 逐行对应） ----------------
@@ -60,18 +64,23 @@ return {
       return `${stem}-${h.toString(36).slice(0, 6)}`
     }
     const validateOperation = (op) => {
+      if (!op || typeof op !== 'object' || Array.isArray(op)) return 'operation must be an object.'
+      if (!['add', 'patch', 'replace', 'remove'].includes(op.action)) return 'unknown memory action.'
+      if (op.content !== undefined && typeof op.content !== 'string') return 'content must be a string.'
+      if (op.oldText !== undefined && typeof op.oldText !== 'string') return 'oldText must be a string.'
       const content = str(op.content).trim()
       const oldText = str(op.oldText).trim()
       if (op.action === 'add') {
         if (content === '') return 'content is required.'
       } else {
         if (oldText === '') return 'old_text is required.'
-        if (op.action === 'replace' && content === '') {
+        if (['patch', 'replace'].includes(op.action) && content === '') {
           return "content is required (use action='remove' to delete)."
         }
       }
       return null
     }
+
     // memory_list 渲染：value 只含请求的库，缺失/空库跳过（回归：单库曾读 undefined.length 崩溃）
     const renderBankList = (value, banks, headers) => {
       const lines = []
@@ -89,11 +98,14 @@ return {
       const oldText = str(op.oldText).trim()
       if (op.action === 'add') {
         if (!working.some((e) => e.text === content)) {
+          if (!Number.isSafeInteger(seqCounter.next) || seqCounter.next < 1) return pos + ': memory sequence is exhausted; no operations were applied.'
           working.push({ text: content, seq: seqCounter.next++, createdAt: now(), updatedAt: now() })
         }
         return null
       }
-      // 精确匹配优先（UI 传完整文本时永远唯一命中），无命中回退子串语义
+      // 精确匹配优先（UI 传完整文本时永远唯一命中，即使该文本是其他条目的
+      // 子串——回归：条目 "11" 曾被其他含 "11" 的条目干扰而无法删除/编辑）；
+      // 无精确命中时回退 Hermes 原版子串语义（模型 memory 工具行为不变）。
       let matches = working
         .map((entry, index) => ({ entry, index }))
         .filter((c) => c.entry.text === oldText)
@@ -106,13 +118,84 @@ return {
       if (new Set(matches.map((m) => m.entry.text)).size > 1) {
         return `${pos}: '${oldText}' matched multiple distinct entries — be more specific.`
       }
-      if (op.action === 'replace') {
+      if (op.action === 'patch') {
+        const entry = matches[0].entry.text
+        const start = entry.indexOf(oldText)
+        if (entry.indexOf(oldText, start + 1) !== -1) return pos + ': oldText occurs more than once in the entry; include more context.'
+        const text = entry.slice(0, start) + content + entry.slice(start + oldText.length)
+        if (text === entry) return pos + ': patch leaves the entry unchanged.'
+        working[matches[0].index] = { ...matches[0].entry, text, updatedAt: now() }
+      } else if (op.action === 'replace') {
         working[matches[0].index] = { ...working[matches[0].index], text: content, updatedAt: now() }
       } else {
         working.splice(matches[0].index, 1)
       }
       return null
     }
+
+
+    /** Python len parity: astral characters count once; combining marks remain separate. */
+    const countChars = text => Array.from(text).length
+
+    /**
+     * Deterministic content guard adapted from Hermes tools/threat_patterns.py
+     * (NousResearch/hermes-agent, MIT, upstream 0f0e96fc). No network or LLM calls.
+     * Deliberately bounded; this is a heuristic, not a complete injection detector.
+     */
+    function scanMemoryContent(content) {
+      let raw = '', scanned = 0
+      for (const point of content) { if (scanned++ >= 65536) break; raw += point }
+      // ZWJ/ZWNJ are valid emoji and natural-language characters.
+      const invisible = raw.match(/[\u200b\u2060\u2062\u2063\u2064\ufeff\u202a-\u202e\u2066-\u2069]/u)
+      if (invisible) return 'invisible_unicode_U+' + invisible[0].codePointAt(0).toString(16).toUpperCase().padStart(4, '0')
+      // Keep line boundaries, collapse horizontal whitespace before regex evaluation.
+      // Avoid overlapping variable-length whitespace matches on adversarial padding.
+      const text = raw.normalize('NFKC').replace(/[^\S\n]+/gu, ' ')
+      const filler = '(?:\\w+\\s+){0,8}'
+      const secret = String.raw`\$\{?\w*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)S?\b`
+      const patterns = [
+        ['prompt_injection', new RegExp('ignore\\s+' + filler + '(previous|all|above|prior)\\s+' + filler + 'instructions', 'i')],
+        ['sys_prompt_override', /system\s+prompt\s+override/i],
+        ['disregard_rules', new RegExp('disregard\\s+' + filler + '(your|all|any)\\s+' + filler + '(instructions|rules|guidelines)', 'i')],
+        ['bypass_restrictions', /act\s+as\s+(if|though)\s+(?:\w+\s+){0,8}you\s+(?:\w+\s+){0,8}(have\s+no|don't\s+have)\s+(?:\w+\s+){0,8}(restrictions|limits|rules)/i],
+        ['html_comment_injection', /<!--[^>]{0,512}(?:ignore|override|system|secret|hidden)[^>]{0,512}-->/i],
+        ['hidden_div', /<\s*div\s+style\s*=\s*["'][^>]{0,2048}display\s*:\s*none/i],
+        ['translate_execute', /translate\s+[^\n]{0,512}\s+into\s+\w+(?:[\s-]+\w+){0,2}\s+and\s+(execute|run|eval)\b/i],
+        ['deception_hide', new RegExp('do\\s+not\\s+' + filler + 'tell\\s+' + filler + 'the\\s+user', 'i')],
+        ['role_hijack', /you\s+are\s+(?:\w+\s+){0,8}now\s+(?:a|an|the)\s+/i],
+        ['role_pretend', /pretend\s+(?:\w+\s+){0,8}(you\s+are|to\s+be)\s+/i],
+        ['leak_system_prompt', /output\s+(?:\w+\s+){0,8}(system|initial)\s+prompt/i],
+        ['remove_filters', /(respond|answer|reply)\s+without\s+(?:\w+\s+){0,8}(restrictions|limitations|filters|safety)/i],
+        ['fake_update', /you\s+have\s+been\s+(?:\w+\s+){0,8}(updated|upgraded|patched)\s+to/i],
+        ['identity_override', /\bname\s+yourself\s+\w+/i],
+        ['c2_node_registration', /register\s+(as\s+)?a?\s*node/i],
+        ['c2_heartbeat', /(heartbeat|beacon|check[\s-]?in)\s+(to|with)\s+/i],
+        ['c2_task_pull', /pull\s+(down\s+)?(?:new\s+)?task(?:ing|s)?\b/i],
+        ['c2_network_connect', /connect\s+to\s+the\s+network\b/i],
+        ['forced_action', /you\s+must\s+(?:\w+\s+){0,3}(register|connect|report|beacon)\b/i],
+        ['anti_forensic_oneliner', /only\s+use\s+one[\s-]?liners?\b/i],
+        ['anti_forensic_disk', /never\s+(?:\w+\s+){0,8}(?:create|write)\s+(?:\w+\s+){0,8}(?:script|file)\s+(?:\w+\s+){0,8}disk/i],
+        ['env_var_unset_agent', /unset\s+\w*(?:CLAUDE|CODEX|HERMES|AGENT|OPENAI|ANTHROPIC)\w*/i],
+        ['known_c2_framework', /\b(?:cobalt\s*strike|sliver|havoc|mythic|metasploit|brainworm)\b/i],
+        ['c2_explicit', /\bc2\s+(?:server|channel|infrastructure|beacon)\b/i],
+        ['c2_explicit_long', /\bcommand\s+and\s+control\b/i],
+        ['exfil_curl', new RegExp('curl\\s+[^\\n]{0,2048}' + secret, 'i')],
+        ['exfil_wget', new RegExp('wget\\s+[^\\n]{0,2048}' + secret, 'i')],
+        ['read_secrets', /cat\s+[^\n]{0,2048}(\.env|credentials|\.netrc|\.pgpass|\.npmrc|\.pypirc)/i],
+        ['send_to_url', /(send|post|upload|transmit)\s+[^\n]{0,2048}\s+(to|at)\s+https?:\/\//i],
+        ['context_exfil', /(include|output|print|share)\s+(?:\w+\s+){0,8}(conversation|chat\s+history|previous\s+messages|full\s+context|entire\s+context)/i],
+        ['ssh_backdoor', /(?:append|add|write|echo|tee|>>?) [^\n]{0,512}authorized_keys/i],
+        ['ssh_access', /(?:\b(?:echo|cat|cp|mv|dd|tee|install|printf|rsync|scp|ln|append|add|write|sed|chmod|chown|truncate|rm|touch|curl|wget|git)\b|\bopen\s*\(|>>?)[^\n]{0,512}(?:\$HOME\/\.ssh|~\/\.ssh)/i],
+        ['hermes_env', /\$HOME\/\.hermes\/\.env|~\/\.hermes\/\.env/i],
+        ['agent_config_mod', /(update|modify|edit|write|change|append|add\s+to)\s+[^\n]{0,2048}(?:AGENTS\.md|CLAUDE\.md|\.cursorrules|\.clinerules)/i],
+        ['hermes_config_mod', /(update|modify|edit|write|change|append|add\s+to)\s+[^\n]{0,2048}\.hermes\/(config\.yaml|SOUL\.md)/i],
+      ]
+      for (const [id, pattern] of patterns) if (pattern.test(text)) return id
+      const secrets = text.matchAll(/(?:api[_-]?key|token|secret|password)\s*[=:]\s*["']([A-Za-z0-9+/=_-]{20,})/gi)
+      for (const match of secrets) if (!/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$/.test(match[1])) return 'hardcoded_secret'
+      return null
+    }
+
 
     // ---------------- 非纯辅助 ----------------
     const enqueue = (task) => {
@@ -121,7 +204,7 @@ return {
       return p
     }
     const entriesOf = (bank) => [...store.tables[bank].values()].sort((a, b) => a.seq - b.seq).map((r) => r.text)
-    const charCount = (bank) => renderEntries(entriesOf(bank)).length
+    const charCount = (bank) => countChars(renderEntries(entriesOf(bank)))
     const usageLine = (bank) => {
       const current = charCount(bank)
       const limit = LIMITS[bank]
@@ -135,54 +218,53 @@ return {
     }
 
     // ---------------- 存储（带自愈） ----------------
-    async function openStore(retried) {
+    async function openStore() {
       const backend = storageBackend()
       if (backend === undefined || backend.kv === undefined) throw new Error('json 存储后端不可用')
-      let unit
+      // Version 2 commits both banks as one singleton, so a batch is one durable write.
+      // Version 1 table records remain available as an upgrade recovery copy.
+      const unit = await backend.kv.open({
+        name: 'hermes_memory', version: 2, compatibleVersions: [1], tables: BANKS, hasGlobal: true,
+      })
       try {
-        unit = await backend.kv.open({
-          name: 'hermes_memory',
-          version: 1,
-          tables: BANKS,
-          hasGlobal: false,
-        })
-      } catch (e) {
-        const message = String((e && e.message) || e)
-        // 自愈：句柄被僵尸单元占用 -> 强制关闭后重试一次
-        if (!retried && message.includes('already open')) {
-          const zombie = backend.open && backend.open.get('hermes_memory')
-          const zombieOpening = backend.opening && backend.opening.get('hermes_memory')
-          console.error(`[hermes-memory] unit handle held by a stale owner; force-closing (open=${zombie !== undefined}, opening=${zombieOpening !== undefined})`)
-          if (zombie) await zombie.close().catch(() => {})
-          return openStore(true)
-        }
-        throw e
-      }
-      const snap = await unit.loadAll()
-      store.unit = unit
-      for (const bank of BANKS) {
-        const m = new Map()
-        const records = (snap.tables && snap.tables[bank]) || {}
-        let maxSeq = 0
-        for (const k of Object.keys(records)) {
-          const r = records[k]
-          if (r && typeof r.text === 'string') {
-            m.set(k, r)
-            if (typeof r.seq === 'number' && r.seq > maxSeq) maxSeq = r.seq
+        const snap = await unit.loadAll()
+        if (store.disposed) throw new Error('memory plugin is disposed')
+        const tables = snap.global === null ? snap.tables : snap.global.tables
+        if (snap.global !== null && snap.global.format !== 2) throw new Error('Unsupported memory snapshot format')
+        const loaded = { memory: new Map(), user: new Map() }
+        const seq = { memory: 0, user: 0 }
+        for (const bank of BANKS) {
+          const records = tables && tables[bank]
+          if (!records || typeof records !== 'object' || Array.isArray(records)) throw new Error('Malformed memory bank: ' + bank)
+          const sequences = new Set()
+          for (const [key, record] of Object.entries(records)) {
+            if (!record || typeof record.text !== 'string' || !Number.isSafeInteger(record.seq) || record.seq < 1) {
+              throw new Error('Malformed memory record in ' + bank + '; saved data was left unchanged')
+            }
+            if (sequences.has(record.seq)) throw new Error('Duplicate memory sequence in ' + bank + '; saved data was left unchanged')
+            sequences.add(record.seq)
+            loaded[bank].set(key, record)
+            seq[bank] = Math.max(seq[bank], record.seq)
           }
         }
-        store.tables[bank] = m
-        store.seq[bank] = maxSeq
+        store.tables = loaded
+        store.seq = seq
+        store.unit = unit
+        store.ready = true
+        store.error = null
+        store.openAttempts += 1
+      } catch (error) {
+        await unit.close()
+        throw error
       }
-      store.ready = true
-      store.openAttempts += 1
-      console.log(`[hermes-memory] store opened (attempt #${store.openAttempts}): memory=${entriesOf('memory').length}, user=${entriesOf('user').length}`)
     }
+
     let initPromise = null
     function ensureReady() {
+      if (store.disposed) return Promise.reject(new Error('memory plugin is disposed'))
       if (store.ready) return Promise.resolve()
       if (initPromise === null) {
-        initPromise = openStore(false).catch((e) => {
+        initPromise = openStore().catch((e) => {
           store.error = String((e && e.message) || e)
           initPromise = null
           throw e
@@ -193,25 +275,16 @@ return {
     ctx.effect(() => {
       ensureReady().catch(() => {})
       // disposer 返回 Promise：纤维销毁时等待 close 完成，避免关闭竞态
-      return () => {
+      return async () => {
+        store.disposed = true
+        await initPromise?.catch(() => {})
+        await store.chain
+        store.ready = false
         const unit = store.unit
         store.unit = null
-        if (unit) return unit.close().catch(() => {})
+        if (unit) await unit.close()
       }
     })
-
-    function putRecord(bank, key, record) {
-      return enqueue(async () => {
-        await store.unit.putRecord(bank, key, record)
-        store.tables[bank].set(key, record)
-      })
-    }
-    function deleteRecord(bank, key) {
-      return enqueue(async () => {
-        await store.unit.deleteRecord(bank, key)
-        store.tables[bank].delete(key)
-      })
-    }
 
     // ---------------- 合并协议 ----------------
     // 镜像 lib/core.js 的 consolidationFailure：'ui'（面板）不参与失败上限协议
@@ -231,10 +304,14 @@ return {
         ].join(' '),
       }
     }
-    async function applyBatch(bank, operations, sessionId) {
+    function applyBatch(bank, operations, sessionId) {
+      // Serialize the complete read/validate/commit, not just individual record writes.
+      return enqueue(() => commitBatch(bank, operations, sessionId))
+    }
+    async function commitBatch(bank, operations, sessionId) {
       await ensureReady()
       if (operations.length === 0) {
-        return { success: false, target: bank, error: 'operations list is empty.' }
+        return consolidationFailure(failures, MAX_CONSOLIDATION_FAILURES, bank, { success: false, target: bank, error: 'operations list is empty.' }, sessionId)
       }
       for (let i = 0; i < operations.length; i++) {
         const problem = validateOperation(operations[i])
@@ -252,7 +329,8 @@ return {
       const recs = [...store.tables[bank].values()].sort((a, b) => a.seq - b.seq)
       const working = recs.map((r) => ({ text: r.text, seq: r.seq, createdAt: r.createdAt, updatedAt: r.updatedAt }))
       working.bank = bank
-      const seqCounter = { next: store.seq[bank] + 1 } // 局部计数器（#7）
+      // 局部序号计数器：失败回滚时不污染全局 seq（#7）
+      const seqCounter = { next: store.seq[bank] + 1 }
       for (let i = 0; i < operations.length; i++) {
         const op = operations[i]
         const failure = stepOperation(working, op, `Operation ${i + 1} (${op.action})`, seqCounter)
@@ -266,18 +344,29 @@ return {
           }, sessionId)
         }
       }
-      if (renderEntries(working.map((w) => w.text)).length > limit) {
+      if (countChars(renderEntries(working.map((w) => w.text))) > limit) {
         return consolidationFailure(failures, MAX_CONSOLIDATION_FAILURES, bank, {
           success: false,
           target: bank,
           error: [
             `After applying all ${operations.length} operations, memory would be at`,
-            `${renderEntries(working.map((w) => w.text)).length.toLocaleString()}/${limit.toLocaleString()} chars — over the limit.`,
+            `${countChars(renderEntries(working.map((w) => w.text))).toLocaleString()}/${limit.toLocaleString()} chars — over the limit.`,
             'Remove or shorten more entries in the same batch (see current_entries below), then retry.',
           ].join(' '),
           currentEntries: entriesOf(bank),
           usage: usageLine(bank),
         }, sessionId)
+      }
+      if (CONTENT_GUARD) {
+        const unchanged = new Set(recs.map(record => record.text))
+        for (const record of working) {
+          if (unchanged.has(record.text)) continue
+          const threat = scanMemoryContent(record.text)
+          if (threat) return consolidationFailure(failures, MAX_CONSOLIDATION_FAILURES, bank, {
+            success: false, target: bank, error: 'Blocked memory content: ' + threat + '. No operations were applied.',
+            currentEntries: entriesOf(bank), usage: usageLine(bank),
+          }, sessionId)
+        }
       }
       const before = new Map(store.tables[bank])
       const tasks = []
@@ -290,12 +379,31 @@ return {
         const existing = [...before.values()].find((r) => r.seq === w.seq)
         if (!existing) tasks.push({ kind: 'put', bank, key: `${w.seq}-${slugKey(w.text)}`, record: w })
       }
-      for (const t of tasks) {
-        if (t.kind === 'del') await deleteRecord(t.bank, t.key)
-        else await putRecord(t.bank, t.key, t.record)
+      const updated = new Map(before)
+      for (const task of tasks) {
+        if (task.kind === 'del') updated.delete(task.key)
+        else updated.set(task.key, task.record)
       }
-      store.seq[bank] = seqCounter.next - 1 // 提交成功：写回全局 seq
+      if (tasks.length > 0) {
+        const tables = Object.fromEntries(BANKS.map(name => [name, Object.fromEntries(name === bank ? updated : store.tables[name])]))
+        try {
+          await store.unit.setGlobal({ format: 2, tables })
+        } catch (error) {
+          if (error && error.code === 'unknown-state') {
+            store.ready = false
+            store.error = 'Memory storage outcome is unknown; reload the plugin before retrying'
+            // Keep the rejected initialization promise: no further read or write may claim success.
+            initPromise = Promise.reject(new Error(store.error))
+            initPromise.catch(() => {})
+          }
+          throw error
+        }
+        store.tables[bank] = updated
+      }
+      store.seq[bank] = seqCounter.next - 1
+
       failures.delete(sessionId)
+      if (sessionId !== 'ui') lastWriteEventCount.set(sessionId, activeSessionEventCount.get(sessionId) ?? 0)
       return {
         success: true,
         done: true,
@@ -357,7 +465,7 @@ return {
       'memory',
       [
         'Persistent self-maintained memory: bounded, durable notes that survive across sessions.',
-        'MEMORY.md holds your personal notes (environment facts, project conventions, tool quirks, things learned);',
+        'MEMORY.md holds stable facts useful across sessions (environment and durable project conventions);',
         'USER.md holds what you know about the user (preferences, communication style, workflow habits).',
         'Both are re-injected as a frozen snapshot at each session start.',
         '',
@@ -368,11 +476,11 @@ return {
         'with shorter ones or remove stale ones) and retry. Successful writes are final — do not repeat them.',
       ].join(' '),
       {
-        action: { type: 'string', enum: ['add', 'replace', 'remove', 'batch'], required: true, description: 'What to do: add one entry, replace or remove entries matched by substring, or apply a batch atomically.' },
+        action: { type: 'string', enum: ['add', 'patch', 'replace', 'remove', 'batch'], required: true, description: 'Add an entry, patch one unique span, replace a whole entry, remove an entry, or apply an atomic batch.' },
         target: { type: 'string', enum: ['memory', 'user'], description: 'Store to update. Defaults to memory (your personal notes). user = the user profile.' },
-        content: { type: 'string', description: 'New entry text for add; replacement text for replace; per-operation content in batch.' },
-        oldText: { type: 'string', description: 'Short unique substring of the entry to replace or remove.' },
-        operations: { type: 'array', description: 'For action=batch: ordered operations applied all-or-nothing.', items: { type: 'object', additionalProperties: true, properties: { action: { type: 'string', enum: ['add', 'replace', 'remove'] }, content: { type: 'string' }, oldText: { type: 'string' } } } },
+        content: { type: 'string', description: 'New entry text for add; new span for patch; whole replacement entry for replace.' },
+        oldText: { type: 'string', description: 'For patch: exact span occurring once in one entry. For replace/remove: unique entry text or identifying substring.' },
+        operations: { type: 'array', description: 'For action=batch: ordered operations applied all-or-nothing.', items: { type: 'object', additionalProperties: true, properties: { action: { type: 'string', enum: ['add', 'patch', 'replace', 'remove'] }, content: { type: 'string' }, oldText: { type: 'string' } } } },
       },
       renderWriteResult,
       async (args, exec) => {
@@ -381,7 +489,7 @@ return {
         if (args.action === 'batch') {
           const operations = args.operations
           if (!Array.isArray(operations) || operations.length === 0) {
-            return { success: false, target, error: "action='batch' requires a non-empty operations list." }
+            return consolidationFailure(failures, MAX_CONSOLIDATION_FAILURES, target, { success: false, target, error: "action='batch' requires a non-empty operations list." }, sessionId)
           }
           return await applyBatch(target, operations, sessionId)
         }
@@ -504,24 +612,24 @@ return {
       for (const event of events) if (isOurMessage(event)) return true
       return false
     }
-    function turnsSinceMemoryWrite(events) {
+    function turnsSinceMemoryWrite(events, sessionId) {
+      const start = lastWriteEventCount.get(sessionId) ?? 0
       let turns = 0
-      for (const event of events) {
-        if (event.type === 'turn/start') turns += 1
-        else if (event.type === 'tool/call' && event.data && event.data.name === 'memory') turns = 0
-      }
+      for (let i = start; i < events.length; i++) if (events[i].type === 'turn/start') turns += 1
       return turns
     }
     function renderMemoryBlock(bank) {
       const entries = entriesOf(bank)
       if (entries.length === 0) return ''
       const header = `${HEADERS[bank]} [${usageLine(bank)}]`
-      const content = escapeFrame(renderEntries(entries))
+      const promptEntries = entries.map(entry => CONTENT_GUARD && scanMemoryContent(entry)
+        ? '[Memory entry withheld by the content guard; review it in the memory panel.]' : entry)
+      const content = escapeFrame(renderEntries(promptEntries))
       return `${RULER}\n${header}\n${RULER}\n${content}`
     }
     function renderSnapshotMessage() {
       const blocks = BANKS.map(renderMemoryBlock).filter((b) => b !== '')
-      if (blocks.length === 0) return ''
+      if (blocks.length === 0) blocks.push('Both persistent memory banks are empty at session start.')
       return [
         SYSTEM_REMINDER_OPEN,
         MARKER_SNAPSHOT,
@@ -562,18 +670,26 @@ return {
       }
       const agent = payload.agent
       const sessionId = agent && agent.session ? String(agent.session.id) : null
-      if (sessionId) failures.delete(sessionId)
+      if (sessionId && payload.step === 1) failures.delete(sessionId)
       const messages = []
       try {
         const events = agent.session.events
-        // #6：存储未就绪时节流重试（30s 间隔），避免首次 open 失败后快照永久缺失
+        activeSessionEventCount.set(sessionId, events.length)
+        // Bound per-session diagnostic/nudge state in long-lived deployments.
+        if (activeSessionEventCount.size > 1000) {
+          const oldest = activeSessionEventCount.keys().next().value
+          activeSessionEventCount.delete(oldest); lastWriteEventCount.delete(oldest)
+          failures.delete(oldest); lastNudgeTurn.delete(oldest)
+        }
         if (!store.ready) {
-          const t = Date.now()
-          if (t - lastOpenAttemptAt > 30000) {
-            lastOpenAttemptAt = t
-            ensureReady().catch(() => {})
+          const now = Date.now()
+          if (now - lastOpenAttemptAt >= 30000) {
+            lastOpenAttemptAt = now
+            await ensureReady()
           }
         }
+        await store.chain
+
         if (store.ready && !hasVisibleMemorySnapshot(events)) {
           const text = renderSnapshotMessage()
           if (text !== '') messages.push(makeMessage(text))
@@ -581,7 +697,7 @@ return {
         // #2：nudge 去重 —— 同一会话每隔 NUDGE_INTERVAL 轮才提醒一次
         if (NUDGE_INTERVAL > 0) {
           const lastN = lastNudgeTurn.get(sessionId)
-          if ((lastN === undefined || payload.turn - lastN >= NUDGE_INTERVAL) && turnsSinceMemoryWrite(events) >= NUDGE_INTERVAL) {
+          if ((lastN === undefined || payload.turn - lastN >= NUDGE_INTERVAL) && turnsSinceMemoryWrite(events, sessionId) >= NUDGE_INTERVAL) {
             messages.push(makeMessage(renderNudgeMessage()))
             lastNudgeTurn.set(sessionId, payload.turn)
           }
@@ -616,23 +732,49 @@ return {
     // 沙箱 ctx 无 ctx.wait：webServer 可能晚于本插件激活，用 timer 轮询等待
     //（TUI 模式无 webServer，30 次后放弃，无副作用）。需 inject: ['timer']。
     const registerPanelRoutes = (wsrv) => {
+      const authorize = (req, res, method) => {
+        const connection = ctx.get('connection')
+        if (!connection || typeof connection.requestRejection !== 'function') {
+          json(res, 503, { success: false, error: 'DSH authenticated connection service is unavailable' })
+          return false
+        }
+        const rejection = connection.requestRejection(req)
+        if (rejection !== undefined) {
+          json(res, rejection, { success: false, error: rejection === 401 ? 'unauthorized' : 'forbidden' })
+          return false
+        }
+        if (req.method !== method) {
+          res.setHeader('Allow', method)
+          json(res, 405, { success: false, error: 'method not allowed' })
+          return false
+        }
+        return true
+      }
       const json = (res, code, value) => {
-        res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' })
+        res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
         res.end(JSON.stringify(value))
       }
       const readBody = async (req) => {
-        let raw = ''
+        const decoder = new TextDecoder('utf-8', { fatal: true })
+        const encoder = new TextEncoder()
+        let size = 0, raw = ''
         for await (const chunk of req) {
-          if (raw.length > 65536) throw new Error('body too large')
-          raw += chunk
+          const bytes = typeof chunk === 'string' ? encoder.encode(chunk) : chunk
+          size += bytes.length
+          if (size > 65536) throw Object.assign(new Error('body too large'), { status: 413 })
+          raw += decoder.decode(bytes, { stream: true })
         }
-        return raw
+        return raw + decoder.decode()
       }
       ctx.effect(() => wsrv.register({
         kind: 'exact',
         path: '/hermes-memory/stats',
-        handler: async (_req, res) => {
-          try { await ensureReady() } catch { /* fall through */ }
+        handler: async (req, res) => {
+          if (!authorize(req, res, 'GET')) return
+          try { await ensureReady(); await store.chain } catch (error) {
+            json(res, 503, { ready: false, error: String(error.message || error) })
+            return
+          }
           const recent = []
           for (const bank of BANKS) {
             const recs = [...store.tables[bank].values()].sort((a, b) => b.seq - a.seq).slice(0, 3)
@@ -652,16 +794,39 @@ return {
         kind: 'exact',
         path: '/hermes-memory/ops',
         handler: async (req, res) => {
+          if (!authorize(req, res, 'POST')) return
           try {
-            const input = JSON.parse(await readBody(req))
+            let input
+            try { input = JSON.parse(await readBody(req)) } catch (error) {
+              json(res, error.status || 400, { success: false, error: String(error.message || error) })
+              return
+            }
+            if (!input || typeof input !== 'object' || Array.isArray(input)) {
+              json(res, 400, { success: false, error: 'Expected a JSON object' })
+              return
+            }
+            if (input.bank !== undefined && !BANKS.includes(input.bank)) {
+              json(res, 400, { success: false, error: 'Unknown memory bank' })
+              return
+            }
+            await ensureReady()
+            await store.chain
             const bank = input.bank === 'user' ? 'user' : 'memory'
             let op = null
             if (input.action === 'add') {
-              op = { action: 'add', content: String(input.content ?? '') }
-            } else if (input.action === 'replace') {
-              op = { action: 'replace', oldText: String(input.oldText ?? ''), content: String(input.content ?? '') }
+              op = { action: 'add', content: input.content }
+            } else if (input.action === 'patch' || input.action === 'replace') {
+              op = { action: input.action, oldText: input.oldText, content: input.content }
             } else if (input.action === 'remove') {
-              op = { action: 'remove', oldText: String(input.oldText ?? '') }
+              op = { action: 'remove', oldText: input.oldText }
+            } else if (input.action === 'batch') {
+              if (!Array.isArray(input.operations)) {
+                json(res, 400, { success: false, error: 'Expected an operations array' })
+                return
+              }
+              const out = await applyBatch(bank, input.operations, 'ui')
+              json(res, out.success ? 200 : 422, out)
+              return
             }
             if (op !== null) {
               const out = await applyBatch(bank, [op], 'ui')

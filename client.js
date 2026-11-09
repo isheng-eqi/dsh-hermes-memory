@@ -6,6 +6,7 @@
  * 数据通过 Package-private RPC（host.call('mem-stats')）从 Host 获取。
  */
 return {
+  inject: ['slots'],
   apply(ctx) {
     const slots = ctx.get('slots')
     if (slots === undefined) return
@@ -14,12 +15,37 @@ return {
       () => {
         const [stats, setStats] = React.useState(null)
         const [error, setError] = React.useState(null)
-        const load = () => {
-          host.call('mem-stats', {})
-            .then((v) => { setStats(v); setError(null) })
-            .catch((e) => { setError(String((e && e.message) || e)) })
+        const [loading, setLoading] = React.useState(false)
+        const epoch = React.useRef(0)
+        const mounted = React.useRef(true)
+        const load = async () => {
+          const request = ++epoch.current
+          setLoading(true)
+          setError(null)
+          try {
+            const value = await host.call('mem-stats', {})
+            if (!mounted.current || request !== epoch.current) return
+            if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid memory statistics response')
+            if (value.ready !== true) throw new Error(value.error || value.message || 'Memory store not ready')
+            const validBank = (bank) => bank && Number.isInteger(bank.entries) && bank.entries >= 0 && typeof bank.usage === 'string'
+            if (!validBank(value.memory) || !validBank(value.user)
+              || (value.file !== undefined && typeof value.file !== 'string')
+              || (value.recent !== undefined && (!Array.isArray(value.recent) || value.recent.some((row) => !row
+                || (row.bank !== 'memory' && row.bank !== 'user') || typeof row.text !== 'string')))) {
+              throw new Error('Invalid memory statistics response')
+            }
+            setStats(value)
+          } catch (e) {
+            if (mounted.current && request === epoch.current) setError(String((e && e.message) || e))
+          } finally {
+            if (mounted.current && request === epoch.current) setLoading(false)
+          }
         }
-        React.useEffect(() => { load() }, [])
+        React.useEffect(() => {
+          mounted.current = true
+          void load()
+          return () => { mounted.current = false; epoch.current += 1 }
+        }, [])
         const card = {
           border: '1px solid var(--dsh-border, #444)',
           borderRadius: 8,
@@ -49,10 +75,12 @@ return {
           React.createElement('div', { key: 'title', style: { fontWeight: 600 } }, '🧠 Hermes Memory'),
         ]
         if (error) {
-          children.push(React.createElement('div', { key: 'err', style: { color: '#e5484d' } }, `Error: ${error}`))
-        } else if (stats === null) {
-          children.push(React.createElement('div', { key: 'load', style: { opacity: 0.7 } }, 'Loading…'))
-        } else if (stats.ready) {
+          children.push(React.createElement('div', { key: 'err', role: 'alert', style: { color: '#e5484d' } }, `Error: ${error}`))
+        }
+        if (loading) {
+          children.push(React.createElement('div', { key: 'load', role: 'status', style: { opacity: 0.7 } }, 'Loading…'))
+        }
+        if (stats !== null) {
           children.push(React.createElement('div', { key: 'counts', style: row },
             React.createElement('span', { style: chip }, `📝 MEMORY.md ${stats.memory.entries} entries · ${stats.memory.usage}`),
             React.createElement('span', { style: chip }, `👤 USER.md ${stats.user.entries} entries · ${stats.user.usage}`),
@@ -68,10 +96,10 @@ return {
             ))
           }
           children.push(React.createElement('div', { key: 'file', style: { ...mono, marginTop: 6 } }, stats.file))
-        } else {
-          children.push(React.createElement('div', { key: 'nrdy', style: { color: '#e5484d' } }, `Not ready: ${stats.error}`))
         }
-        children.push(React.createElement('button', { key: 'btn', style: btn, onClick: load }, '↻ Refresh'))
+        children.push(React.createElement('button', {
+          key: 'btn', style: btn, onClick: () => { void load() }, disabled: loading,
+        }, error ? '↻ Retry' : '↻ Refresh'))
         return React.createElement('div', { style: card }, ...children)
       },
     ))

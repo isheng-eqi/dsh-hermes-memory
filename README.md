@@ -1,92 +1,28 @@
 # dsh-hermes-memory
 
-> Persistent memory for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) that keeps
-> **two separate banks** — `MEMORY.md` for what the agent learns about the world, `USER.md` for what it learns about *you* —
-> plus a **built-in web panel** to inspect and edit both.
+Persistent dual-bank memory and a web panel for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH), inspired by [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent).
 
-**DeepSeek Harness 的双库记忆插件**：把 agent 的记忆分成两个独立的库——MEMORY.md（关于世界的事实：环境、项目约定、工具怪癖）和 USER.md（关于你的画像：偏好、沟通风格、工作习惯），各自独立预算、独立淘汰。模型用一个 `memory` 工具自主策展，跨会话持久化，每个会话以冻结快照重新注入；附带**内置网页面板**，直接查看和修改两个记忆库。机制源自 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) 的 `MemoryStore`，零外部依赖、纯 DSH 原生接缝实现。
+为 DSH 提供两个独立记忆库：`memory`（稳定的环境事实、项目约定）和 `user`（用户偏好与工作习惯）。模型通过 `memory` 工具维护记忆；每个会话读取一次冻结快照；网页面板可以直接查看、添加、修改和删除。插件自身不发起额外 LLM 请求，无外部运行时依赖；工具描述、快照和提醒仍会占用提示 token。
 
-## 为什么分两个库
+> **1.2.0 升级说明：**第一次实际写入会将旧 v1 数据迁移为 v2 单次原子提交格式。升级前备份 `~/.dsh/storages/hermes_memory.json`。旧表保留为迁移恢复副本，v2 全局快照才是后续写入的权威数据；降级必须恢复备份，旧版插件不能读取 v2 更新。网页接口要求当前 DSH 的 owner 身份认证服务；缺少该服务时面板返回 503，工具仍可独立使用。
 
-大多数 agent 记忆方案把什么都装进一个池子——用户画像和项目事实、快变和慢变的信息混在一起。三个后果：
-
-- **抢预算**：一个字符上限的池子里，"用户喜欢简洁回答"和"这个项目的构建命令"互相挤占，谁该留谁该删没有依据。
-- **淘汰一刀切**：用户画像是慢变的（几个月不变），项目事实是快变的（每次迭代都更新），单库只能给两类信息套同一个淘汰策略。
-- **策展互相干扰**：模型决定"该记什么"时，关于你的信息和关于代码的信息搅在一起，两类判断互相污染。
-
-Hermes 的答案是分开：两个独立的库，各自的上限、各自的淘汰节奏。本插件把这个设计忠实落到 DSH。
-
-## Features
-
-| Hermes 机制 | 本插件实现 |
-|---|---|
-| `MEMORY.md` — agent 个人笔记（环境事实/项目约定/工具怪癖），**2200 字符上限** | ✓ `memory` 记忆库 |
-| `USER.md` — 用户画像（偏好/沟通风格/工作习惯），**1375 字符上限** | ✓ `user` 记忆库 |
-| 条目以 `§` 分隔、可多行，字符上限（非 token） | ✓ 同 |
-| 单个 `memory` 工具：`add` / `replace` / `remove` / `batch`（全有或全无） | ✓ 同 |
-| `replace`/`remove` 用唯一子串匹配 `old_text`，多条命中报冲突 | ✓ 同（精确匹配优先，UI 传完整文本永远唯一命中） |
-| 超限不静默丢弃：返回当前条目列表，模型当轮合并后重试；每轮失败上限 3 | ✓ 同 |
-| `add` 自动去重（同文本不重复） | ✓ 同 |
-| **冻结快照**：会话开始注入一次（`<system-reminder>` 框架 + `═` 标尺 + `[n% — x/limit chars]` 用量表头），会话中途写入不改已注入快照（保前缀缓存） | ✓ 同 |
-| nudge 提醒：连续 10 轮无写入提醒持久化 | ✓ 同 |
-| 成功结果：`memory(memory): Entry updated.` + usage + "do not repeat" | ✓ 同 |
-| 工具内部无 LLM（agent-curated 策展，零 LLM 成本） | ✓ 同 |
-| **记忆可视化面板**（Web UI 内查看/增/删/改两个记忆库） | ✓ 本插件独有（见下） |
-
-> 更新于 2026-11-01（DSH 更新后修复 `dsh-hermes-memory` 面板消失的问题，更新 profile 管理器目录，同步插件仓库）
-
-## 记忆面板（Memory Panel）
-
-安装后，DSH Web 界面**侧边栏底部**会出现「记忆」入口，点击打开记忆面板：
-
-![记忆面板](https://cdn.jsdelivr.net/gh/isheng-eqi/dsh-hermes-memory@5cf56dd3c583ba1de2de5a69135255865e95d4d8/docs/panel-1.png)
-
-![记忆面板编辑](https://cdn.jsdelivr.net/gh/isheng-eqi/dsh-hermes-memory@5cf56dd3c583ba1de2de5a69135255865e95d4d8/docs/panel-2.png)
-
-### 功能
-
-- **查看**：MEMORY 与 USER 两个记忆库的全部条目、各自占用率（`84% — 1,859/2,200 chars`）与条数
-- **编辑**：每行「编辑」按钮 → 行内文本域直接修改 → 保存；替换保留条目身份（seq 不变）
-- **删除**：每行「删除」按钮，按条目精确匹配移除
-- **添加**：分区底部输入新条目，回车或「添加」按钮提交（自动去重）
-- **实时同步**：每次操作立即写入 `~/.dsh/storages/hermes_memory.json`（原子写、跨重启持久），状态行给出反馈
-
-### 设计
-
-黑白灰、大量留白、细线分割、克制动效 —— 吸收水墨美学的克制气质，不堆砌装饰：面板即工具，所见即所得。编辑/删除按钮常显（浅灰弱化），悬停加深，不会干扰阅读。
-
-### 架构
-
-```
-浏览器（client 半边，__ModuleLoader__ 模块）
- ├─ sidebar.footer.action「记忆」入口 + shell.overlay 浮层面板（React）
- └─ 同源 fetch → /hermes-memory/stats（GET 统计）
-                    /hermes-memory/ops （POST add/replace/remove/list）
-宿主（host 半边）
- └─ webServer 服务注册上述路由 → applyBatch → KvUnit `hermes_memory` → 落盘
-```
-
-面板与模型 `memory` 工具读写**同一份存储**，两边看到的内容永远一致 —— 模型策展的记忆，你可以随时亲眼查看和修正。
-
-## Quick Start
-
-### 方式 A：dsh bundle 安装（推荐，部署级、重启自动加载）
-
-本仓库是标准 **dsh bundle**（`package.json` 声明 `dsh.bundle` + [`cordis.patch.yml`](cordis.patch.yml)），一行安装：
+## 安装
 
 ```sh
-dsh plugin --profile web add github:isheng-eqi/dsh-hermes-memory
-# 或 npm 源（走 registry CDN，通常更快更稳）
 dsh plugin --profile web add dsh-hermes-memory
-# 或本地路径
-dsh plugin --profile web add /path/to/dsh-hermes-memory
+# 或从 GitHub 安装
+dsh plugin --profile web add github:isheng-eqi/dsh-hermes-memory
 ```
 
-安装后插件在**部署级**生效（所有会话可见）：模型获得 `memory` / `memory_search` / `memory_list` / `memory_stats` / `memory_debug` 工具，每个会话开始自动注入记忆冻结快照，Web 界面侧边栏出现「记忆」面板入口。
+安装后在 DSH 原网页刷新一次，侧边栏底部出现「记忆」入口。插件为所有会话提供 `memory`、`memory_search`、`memory_list`、`memory_stats` 和 `memory_debug`。
 
-> **DSH 0.2.x 兼容（1.1.11 起）**：peer 要求放宽为 `@deepseek-ai/dsh-tools >=0.1.0-rc.6 <0.3.0-0`（旧版声明 `<0.2.0` 会被 0.2.1 直接判定不兼容并**跳过整个 bundle**，面板随之消失）；客户端半边改用 `slots.register()`，因为 0.2.x 的 `SlotRegistry` 已移除 `inject()`。升级 dsh 后如面板消失，先看 `dsh --profile web --dump-config` 是否报 `skipping profile bundle`。
+验证基线为 DSH **0.2.2-alpha.2**（`ce7073d512`）、Node **24.22.2**。宿主 peer 声明为 Cordis 4.x、dsh-tools `>=0.1.0-rc.6 <0.3.0-0`、Schemastery 3.x；peer 范围只表示可组合依赖，不能代替运行验证。
 
-> 存储行归属说明：json storage 三行（`storage` / `storage-json` / `storage-domain`）是**宿主表面自带的组合**——web bundle 默认携带；headless / TUI / 自定义 profile（`dsh plugin --profile <名字> add` 初始化为 base-only）默认**没有**，且 bundle 层不允许重复声明相同行 id（会报 `duplicate loader entry id` 启动失败），所以本插件 patch 不含这些行。在无 storage 的 profile 上插件仍会挂载并打一次启动警告，但写入/快照不可用；如需启用，把下面三行加到该 profile 自己的 `cordis.patch.yml`（web profile 无需）：
+客户端使用 `slots.inject()` 等待 `sidebar.footer.action` 和 `shell.overlay` 的声明，再注册入口与浮层。当前 DSH 仍有此 API；直接抢先 `slots.register()` 会因槽位尚未声明而失败。网页错误、加载中和空库分别展示；失败保留草稿、编辑内容及最后成功快照，并提供重试。
+
+### 没有存储的 profile
+
+Web bundle 自带 `storage`、`storage-json`、`storage-domain`，本插件不重复声明这些行。Headless/TUI 或 base-only profile 需要在自己的配置补充：
 
 ```yaml
 - insert:
@@ -102,86 +38,112 @@ dsh plugin --profile web add /path/to/dsh-hermes-memory
         backend: json
 ```
 
-### 方式 B：动态 Cordis 插件（进程级，无需改部署配置）
+无 JSON 后端时，工具返回存储不可用；不会把读取失败显示成空库或覆盖已有数据。
 
-在任意 DSH 会话中，让模型执行 `cordis_define`（Host 半边代码 = [`host.js`](host.js)，Client 半边 = [`client.js`](client.js)，额外带 Run 卡记忆面板）与 `cordis_run`。注意动态插件随进程退出而消失，重启后需重新运行（数据不丢）。
+### 动态插件
 
-> 动态形态无配置通道：字符上限与 nudge 间隔为硬编码（2200/1375/10），与 bundle 形态默认值一致；如需调整请使用方式 A。
+也可通过 DSH `cordis_define` / `cordis_run` 使用 [host.js](host.js) 与 [client.js](client.js)。动态插件提供统计 Run 卡，随进程退出而卸载，持久数据保留。动态形态使用硬编码默认预算、提醒间隔和内容检查；需要配置时使用 bundle。
 
-### 使用
+**静态 bundle 与动态实例共用同名存储单元，只能启用一个写入实例。**重复打开时拒绝接管其他实例的句柄。不要用多个 DSH 进程同时写同一个存储目录，也不要在进程运行时手改文件：插件写队列保证单实例内的并发，未提供跨进程 CAS/合并。
 
-- **让模型记**：直接对模型说"记住 XXX"即可；每个新会话开始会自动注入记忆快照
-- **自己看/改**：点击侧边栏「记忆」→ 面板直接查看、编辑、删除、添加条目
-- **数据存储**：`~/.dsh/storages/hermes_memory.json`（DSH storage hub 的 json 后端，原子写、人类可读、跨会话跨重启持久）
+## 使用工具
 
-## Tools
+默认 `memory` 库预算 **2200** 字符，`user` 库 **1375** 字符，条目以 `\n§\n` 分隔并计入预算。按 Unicode 码点计数，与 Python `len()` 一致；单个 `😀` 计 1，组合字符按各自码点计数。
 
-### `memory`
-唯一的记忆写入入口，与 hermes-agent 契约一致：
-- `action`：`add` / `replace` / `remove` / `batch`（必填）
-- `target`：`memory`（默认，= MEMORY.md）/ `user`（= USER.md）
-- `content`：新增/替换条目文本
-- `oldText`：replace/remove 时的匹配文本（**精确匹配优先**，无精确命中回退唯一子串匹配）
-- `operations`：batch 时的操作数组（全有或全无，可在一次调用里腾空间+写入）
+| 参数 | 说明 |
+| --- | --- |
+| `action` | `add`、`patch`、`replace`、`remove` 或 `batch`，必填 |
+| `target` | `memory` 或 `user`；为兼容旧版默认 `memory` |
+| `content` | add 的完整条目、patch 的新片段、replace 的完整替换条目 |
+| `oldText` | patch 的精确片段；replace/remove 用于定位条目的文本 |
+| `operations` | batch 的操作数组，每项支持 add/patch/replace/remove |
 
-### 辅助工具
-- `memory_search` — 确定性关键词检索两个记忆库
-- `memory_list` — 列出条目（按存储顺序）
-- `memory_stats` — 用量统计（`3% — 79/2,200 chars`）
-- `memory_debug` — 诊断存储句柄表与 store 状态
-
-## Architecture
-
-```
-┌────────────────────────────────────────────────────────────┐
-│  Web UI 记忆面板（client 半边）                              │
-│  └─ sidebar.footer.action 入口 + shell.overlay 浮层         │
-│     └─ /hermes-memory/* 路由 ↔ 同源 fetch                   │
-├────────────────────────────────────────────────────────────┤
-│  systemPrompt / agent/pre-step                             │
-│  └─ 冻结快照注入（会话首步一次）+ nudge 提醒（每 10 轮）      │
-├────────────────────────────────────────────────────────────┤
-│  `memory` 工具（harness.defineTool/registerTool）            │
-│  └─ MemoryStore 语义：add/replace/remove/batch，§ 分隔条目    │
-│     字符预算（2200/1375），超限合并协议，失败上限 3/轮         │
-│     精确匹配优先（UI 场景），子串匹配回退（模型场景）          │
-├────────────────────────────────────────────────────────────┤
-│  DSH storage hub → json 后端 → KvUnit `hermes_memory`       │
-│  └─ ~/.dsh/storages/hermes_memory.json（原子写、版本化）      │
-└────────────────────────────────────────────────────────────┘
+```json
+{"action":"add","target":"memory","content":"项目使用 Node 24。"}
 ```
 
-- **写链串行**：单进程内所有写入经 promise 链排队，先落盘后更内存。
-- **自愈**：更新/重启插件时若旧纤维的单元句柄未释放（`unit already open`），自动强制关闭僵尸句柄并重开；disposer 返回 Promise 等待 close 完成。
-- **webServer 迟到处理**：路由注册等待 `webServer` 服务（500ms 轮询，最多 30s）；无 webServer 的环境（TUI/headless）自动跳过面板层，工具与注入不受影响。
-- **面板与模型共用同一存储**：面板操作走与 `memory` 工具相同的 `applyBatch` 写链，天然一致。
-- **注入格式**（逐字符对齐 hermes-agent `MemoryStore._render_block`）：
-  ```
-  <system-reminder>
-  <hermes-memory-snapshot>
-  Persistent memory, maintained with the `memory` tool. ...
-  ══════════════════════════════════════════════
-  MEMORY (your personal notes) [3% — 79/2,200 chars]
-  ══════════════════════════════════════════════
-  entry one § entry two
-  ...
-  </system-reminder>
-  ```
-  条目内 `</system-reminder>` 被转义，文件内容无法破坏框架。
+```json
+{"action":"patch","target":"memory","oldText":"Node 24","content":"Node 26"}
+```
 
-## Design Decisions（与 Hermes 原版的差异）
+`patch` 保留同条目中的其他事实，只修改唯一的一处文本；重复片段、多个条目命中或无变化会报错。`replace` 保留旧版整条替换语义，面板编辑也使用它。定位时先精确匹配整个条目，再回退唯一子串；不确定时先调用 `memory_list`。
 
-- **存储介质**：Hermes 用 `~/.hermes/memories/*.md` 文件 + 文件锁/原子 rename；本插件改用 DSH 原生 json 存储单元（本身原子写、版本化、人类可读），单进程内无需文件锁。
-- **注入载体**：Hermes 注入系统提示词；本插件经 `agent/pre-step` 注入 durable user 消息（source `{kind:'plugin', plugin:'hermes-memory'}`），会话日志可重建（model-visible ⟺ logged）。
-- **匹配策略**：Hermes 的 `replace`/`remove` 是纯子串匹配；本插件改为**精确匹配优先**——UI 传完整文本时永远唯一命中（修复短文本条目"11"是其他条目子串时的冲突），模型子串语义保留为回退，两边行为都更稳。
-- **失败上限只约束模型**：Hermes 的"每轮最多失败 3 次"协议仅作用于模型 `memory` 工具调用；面板操作（sessionId `'ui'`）每次失败都返回原始错误，不会被协议文案卡死。
-- **可视化面板**：Hermes 无 UI；本插件用 DSH 原生 slot（`sidebar.footer.action` / `shell.overlay`）+ webServer 路由实现浏览器面板，零前端依赖、零构建步骤。
-- **未实现**（与社区移植版一致）：`write_approval` 审批门、提示注入安全扫描（信任度与 AGENTS.md 相同）、`session_search`（Hermes 用 SQLite FTS5 检索会话历史；DSH 原生 `sessionQuery` 可作后续接入点）。
+```json
+{"action":"batch","target":"memory","operations":[{"action":"remove","oldText":"项目使用 Node 26。"},{"action":"add","content":"项目已迁移到 Node 28。"}]}
+```
 
-## 社区收录
+批操作先在副本上验证最终预算，再一次性提交两个库的完整快照。任一操作失败或持久化失败，不发布新内存状态；可在同一批次腾出空间再新增。每个模型回合超过 3 次合并失败会收到停止重试提示；UI 失败不参与该上限。重复 add 去重。
 
-本插件为 DSH 社区生态的一部分。已收录于 [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)。
+`memory_search` 为本地确定性关键词检索，不访问模型或向量服务。`memory_list` 列出当前数据；`memory_stats` 显示预算；`memory_debug` 只报告存储句柄和加载状态。
+
+## 冻结快照与内容检查
+
+首个可执行模型步骤等待存储初始化与已有写入，再把记忆注入带插件 source 的 durable user 消息。空库也记录已冻结标记：会话中新增记忆不会改变该会话已注入的前缀，新会话读取更新后的内容。每 10 轮未成功保存时可提醒一次；提示只是建议，不会启动后台模型复盘。
+
+默认内容检查参考 Hermes 的确定性 threat patterns，限制扫描长度、规范化 NFKC，检查常见指令注入和秘密外传特征；允许正常 ZWJ emoji 与自然语言。新写入命中时整批拒绝；磁盘已有条目命中时仅在提示快照中显示占位符，原文保留在面板供查看、编辑和删除。标签转义保护提示框架。
+
+这些规则是启发式检查，可能漏报或误报，不构成完整的提示注入防护。静态配置可用 `contentGuard: false` 关闭，动态默认开启。
+
+### 配置
+
+在 profile 对 `hermes-memory` 条目合并配置：
+
+```yaml
+- id: hermes-memory
+  config:
+    memoryCharLimit: 2200
+    userCharLimit: 1375
+    nudgeInterval: 10
+    contentGuard: true
+```
+
+`nudgeInterval: 0` 关闭提醒。字符上限不会自动淘汰条目；调低预算后仍允许列出旧数据，再用批操作压缩。
+
+## 持久化与网页接口
+
+存储位置为 `~/.dsh/storages/hermes_memory.json`，由 DSH storage hub 的 JSON KvUnit 管理。插件读取 v1 表结构，首次变化写入 v2 `global: {format:2,tables:{memory,user}}`；旧表作为恢复副本保留。每批仅一次 `setGlobal`，成功后才更新缓存；重复身份或损坏数据拒绝加载。写入返回 `unknown-state` 后拒绝继续操作，重新加载插件才能恢复判断。
+
+卸载会等待初始化及已执行写链完成，然后关闭自己拥有的句柄。另一个实例的句柄不会被强制关闭。
+
+| 路径 | 方法 | 用途 |
+| --- | --- | --- |
+| `/hermes-memory/stats` | GET | 统计与 ready 状态 |
+| `/hermes-memory/ops` | POST | list/add/patch/replace/remove/batch |
+
+接口复用 DSH `connection.requestRejection()`：要求 owner 登录，校验 Host/Origin，响应禁止缓存。401 表示重新打开 DSH 的认证入口；403 表示来源不可信；503 表示认证服务不可用，或统计接口暂时无法读取存储；操作接口的存储异常返回 500。POST 要求 JSON 对象和合法 bank。浏览器代码检查 HTTP 状态、业务失败和响应结构，失败不显示为成功空库。
+
+## 与最新 Hermes 的对应关系
+
+本次核对上游 `NousResearch/hermes-agent` **`0f0e96fc8e7fd35aba406e4a9fa341fb969d0b41`**（2026-11-08；release 基线 v0.23.0），细节见 [对比与验证记录](docs/2026-11-09_compatibility-and-hermes-report.md)。
+
+| 机制 | 本插件 |
+| --- | --- |
+| 双库、字符预算、手工策展 | 保留，使用 DSH 原生 JSON 持久化 |
+| 冻结快照、唯一片段 patch、Unicode 字符计数 | 已实现，并兼容旧 replace |
+| 写入检查与加载后提示占位 | 本地规则适配，非上游扫描器的逐行为等价实现 |
+| 文件锁、重读外部修改 | 使用单实例写队列及 storage hub；不提供跨进程合并 |
+| 两库独立 enabled 开关、显式必填 target | 保留旧插件两库常开、target 默认 memory |
+| 禁止 consolidation 清空原非空库 | 插件允许用户明确 remove/batch 清空 |
+| 可选写入审批、session_search、外部 provider | 未集成 |
+| 自动后台复盘、LLM extraction | 不默认引入；插件自身不增加 LLM 调用 |
+
+## 开发验证
+
+```sh
+npm install
+npm test
+npm pack --dry-run
+```
+
+默认测试覆盖纯函数、两套 Host、客户端错误/竞态和迁移；额外两项真实 DSH 测试需要指定本机 checkout：
+
+```powershell
+$env:DSH_CLIENT_TEST_CHECKOUT='C:\Users\HI\deepseek-harness'
+npm test
+```
+
+测试只使用临时目录和合成数据，不改真实记忆。修改 [lib/core.js](lib/core.js) 或 [lib/index.js](lib/index.js) 时同步 [host.js](host.js)，两套客户端各有覆盖。
 
 ## License
 
-MIT
+MIT。内容检查部分参考 NousResearch/hermes-agent 的 MIT 实现，归属见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
