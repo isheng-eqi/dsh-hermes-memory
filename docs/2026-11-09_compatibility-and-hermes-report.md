@@ -37,7 +37,8 @@ Hermes 旧 HEAD 保留在本地 `backup/pre-update-20261109`，当前为跟踪 u
 | E-006 | command / [Hermes parity regression](../tests/hermes-parity.test.mjs) | patch 唯一片段、重叠/无变化拒绝、码点计数、内容检查、正常 ZWJ/ZWNJ、65K 空白资源预算通过。`node --test tests/hermes-parity.test.mjs`。默认 2190 空白输入从约 1 秒降到约 2 毫秒，65K 约 6 毫秒；时间为本机采样，不保证其他机器相同。 | n/a；合成内容 |
 | E-007 | command / Hermes Git 与 runtime | `git rev-parse HEAD`、`hermes --version`、`python -c "import tools.memory_tool; import pm; print(pm.venv_is_current())"` 验证上述 SHA、Python 3.14.9、导入成功和 current:true；运行时命令须在 Hermes checkout。 | n/a；不涉及配置或凭据 |
 | E-008 | file / 本机原 memory JSON 和升级前备份 | 重载前后 SHA-256 相等，真实记忆文件未被核验过程改写。复现：升级前备份并用 `Get-FileHash` 比较；备份包含私人记忆，只保留在本机，不进入 Git/npm。 | n/a；私人数据不随报告公开 |
-| E-009 | command / npm auth and publish | 原 token 的 `npm whoami` 返回 E401；隔离配置的官方 web login 未完成；`npm publish --access public --registry=https://registry.npmjs.org` 在打包及测试通过后由 registry 返回 E404（无发布权限）。发布前 registry version 为 1.1.10。后续发布成功与否以 npm registry 实际结果为准，Git tag 不表示 npm 已发布。 | n/a；不记录认证材料 |
+| E-009 | command / 首轮 npm auth and publish | 原 token 的 `npm whoami` 返回 E401；首轮隔离 web login 未完成；直接发布请求返回 E404。恢复登录后包权限为 read-write，但直接发布因账号未启用 2FA 返回 E403。随后上传同一安装包至 npm 暂存区，用户启用 2FA 并在本机终端完成一次性验证。发布前 registry version 为 1.1.10。 | n/a；不记录认证材料 |
+| E-010 | network / 最终 GitHub 与 npm 发布核验 | GitHub `v1.2.0` 指向 `002ef2cd785a1005f3ab96b5002a48ef872c02a8`。公开 npm `/dsh-hermes-memory/1.2.0` 和 dist-tags 接口返回 version/latest 均为 1.2.0；公开下载的 45,610 字节 tarball 与 GitHub 附件、本机已验证安装包的 SHA-512 相同。可用 `npm view dsh-hermes-memory@1.2.0 version dist.shasum dist.integrity` 与 `npm view dsh-hermes-memory dist-tags` 复现。发行包内报告保留打包时的历史状态，本行是发布后补记。 | SHA-1 `8185114f6d58b1ace308eb94fdd99b8ca65dad6a`；[npm](https://www.npmjs.com/package/dsh-hermes-memory/v/1.2.0)、[GitHub release](https://github.com/isheng-eqi/dsh-hermes-memory/releases/tag/v1.2.0) |
 
 ### 结论与修复
 
