@@ -1,8 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
-import { runInNewContext } from 'node:vm'
-import { apply } from '../lib/index.js'
+import { activateHost, projectionFixture, canonicalMemory, timers } from './host-fixture.mjs'
 
 const clone = value => structuredClone(value)
 const deferred = () => {
@@ -16,6 +14,7 @@ const record = (text, seq = 1) => ({ text, seq, createdAt: '2026-11-09T00:00:00Z
 
 async function mount(t, mode, options = {}) {
   let saved = clone(options.snapshot || empty())
+  let runtimeSaved = { global: options.runtime || null, tables: {} }
   let active = false
   let closed = 0
   let writes = 0
@@ -24,9 +23,15 @@ async function mount(t, mode, options = {}) {
   const routes = new Map()
   const events = new Map()
   const disposers = []
+  const projections = projectionFixture()
   const backend = {
     kv: {
       async open(descriptor) {
+        if (descriptor.name === 'hermes_memory_runtime') return {
+          loadAll: async () => clone(runtimeSaved),
+          async setGlobal(global) { if (options.runtimeFailure) throw options.runtimeFailure; runtimeSaved.global = clone(global) },
+          async close() {},
+        }
         if (active) throw new Error('unit already open')
         active = true
         await options.openGate?.promise
@@ -37,6 +42,7 @@ async function mount(t, mode, options = {}) {
             if (failure) throw failure
             writes++
             saved = { ...saved, global: clone(value) }
+            if (options.commitThenThrow) throw Object.assign(new Error('rename committed then EIO'), { code: 'EIO' })
           },
           async putRecord(bank, key, value) { writes++; saved.tables[bank][key] = clone(value) },
           async deleteRecord(bank, key) { writes++; delete saved.tables[bank][key] },
@@ -45,28 +51,20 @@ async function mount(t, mode, options = {}) {
       },
     },
   }
-  const services = {
+  const services = { llm: options.llm,
     storage: { backend: { get: () => backend } },
     connection: { requestRejection: request => request.headers.origin === 'https://foreign.invalid' ? 403 : request.headers.cookie === 'owner=yes' ? undefined : 401 },
+    sessions: options.sessions,
     webServer: { register(route) { routes.set(route.path, route); return () => routes.delete(route.path) } },
   }
-  const ctx = {
+  const ctx = { ...timers,
+    sessionProjections: projections.service,
     tools: { register(tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name) } },
     get: name => services[name],
     effect(fn) { const off = fn(); if (off) disposers.push(off); return off },
     on(name, fn) { events.set(name, fn); return () => events.delete(name) },
   }
-  if (mode === 'static') apply(ctx, { memoryCharLimit: options.limit ?? 2200, userCharLimit: 1375, nudgeInterval: 10 })
-  else {
-    const harness = {
-      defineTool: value => value,
-      registerTool(_ctx, tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name) },
-      handle: () => () => {},
-    }
-    const source = await readFile(new URL('../host.js', import.meta.url), 'utf8')
-    const plugin = runInNewContext('(function () {\n' + source + '\n})()', { harness, console, TextEncoder, TextDecoder })
-    plugin.apply(ctx)
-  }
+  await activateHost(mode, ctx, { memoryCharLimit: options.limit ?? 2200, ...options.config })
   let disposed = false
   async function dispose() {
     if (disposed) return
@@ -75,13 +73,15 @@ async function mount(t, mode, options = {}) {
   }
   t.after(dispose)
   const signal = new AbortController().signal
-  const session = { id: 'session-test', events: [] }
+  const session = projections.session()
   const agent = { session }
   return {
-    tools, routes, services, backend, session, agent, dispose,
-    call: async (name, args = {}) => clone(await tools.get(name).execute(args, { signal, agent })),
+    tools, routes, services, backend, session, agent, dispose, projections,
+    call: async (name, args = {}) => clone(await tools.get(name).execute(name === 'memory' ? canonicalMemory(args) : args, { signal, agent })),
     pre: async (turn = 1, step = 1, decision = { kind: 'enter', messages: [] }) => clone(await events.get('agent/pre-step')({ agent, turn, step, signal }, async () => decision)),
     snapshot: () => clone(saved),
+    rawMemory: args => tools.get('memory').execute(args, { signal, agent }), runtime: () => clone(runtimeSaved),
+    async emit(type, data) { const event = session.append(type, data); events.get('session/event')?.(session, event); await tick() },
     fail(error) { failure = error },
     counters: () => ({ writes, closed, active }),
     async request(path, { method = path.endsWith('/stats') ? 'GET' : 'POST', auth = true, origin, body = { action: 'list' }, chunks } = {}) {
@@ -127,9 +127,9 @@ for (const mode of ['static', 'dynamic']) {
     h.fail(new Error('disk full'))
     await assert.rejects(h.call('memory', { action: 'batch', operations: [{ action: 'remove', oldText: 'original' }, { action: 'add', content: 'replacement' }] }), /disk full/)
     assert.deepEqual(h.snapshot(), before)
-    assert.deepEqual((await h.call('memory_list')).memory, ['original'])
+    await assert.rejects(h.call('memory_list'), /outcome is unknown/)
     h.fail(null)
-    assert.equal((await h.call('memory', { action: 'add', content: 'after recovery' })).success, true)
+    await assert.rejects(h.call('memory', { action: 'add', content: 'after failure' }), /outcome is unknown/)
   })
 
   test(`${mode}: batch is one durable write and upgrades legacy banks without dropping the other bank`, async t => {
@@ -174,9 +174,63 @@ for (const mode of ['static', 'dynamic']) {
     const decision = await pending
     assert.equal(decision.messages.length, 1)
     assert.match(decision.messages[0].content[0].text, /Both persistent memory banks are empty/)
-    h.session.events.push({ type: 'user/message', data: decision.messages[0] })
+    h.session.append('user/message', decision.messages[0])
     await h.call('memory', { action: 'add', content: 'saved later' })
     assert.equal((await h.pre(2)).messages.length, 0)
+  })
+
+  test(`${mode}: projection registration is awaited before publishing consumers`, async t => {
+    const gate = deferred()
+    const projections = projectionFixture()
+    const tools = new Map(), listeners = new Map(), disposers = []
+    const ctx = { ...timers,
+      sessionProjections: { async register(definition) { await gate.promise; return await projections.service.register(definition) } },
+      get: () => undefined,
+      tools: { register(tool) { tools.set(tool.name, tool); return () => tools.delete(tool.name) } },
+      on(name, fn) { listeners.set(name, fn) },
+      interval: () => () => {},
+      effect(fn) { const off = fn(); if (off) disposers.push(off); return off },
+    }
+    const mounting = activateHost(mode, ctx)
+    await tick()
+    assert.equal(tools.size, 0)
+    assert.equal(listeners.size, 0)
+    gate.resolve()
+    await mounting
+    for (const off of disposers.toReversed()) await off()
+    assert.equal(projections.releases, 1)
+  })
+
+  test(`${mode}: pre-step preserves request-series and existing messages on an opaque Session`, async t => {
+    const h = await mount(t, mode)
+    assert.equal('events' in h.session, false)
+    const existing = { id: 'upstream', role: 'user', content: [{ type: 'text', text: 'upstream' }] }
+    const decision = await h.pre(1, 1, { kind: 'enter', messages: [existing], startsRequestSeries: true })
+    assert.equal(decision.startsRequestSeries, true)
+    assert.deepEqual(decision.messages[0], existing)
+    assert.match(decision.messages[1].content[0].text, /<hermes-memory-snapshot>/)
+    await h.dispose()
+    assert.equal(h.projections.releases, 1)
+  })
+
+  test(`${mode}: ordinary pre-steps never inject obsolete persistence nudges`, async t => {
+    const h = await mount(t, mode)
+    for (const message of (await h.pre()).messages) h.session.append('user/message', message)
+    for (let turn = 1; turn <= 20; turn++) {
+      h.session.append('turn/start', { turn })
+      assert.equal((await h.pre(turn)).messages.length, 0)
+    }
+  })
+
+  test(`${mode}: storage failures leave the write counter unchanged`, async t => {
+    const h = await mount(t, mode)
+    for (const message of (await h.pre()).messages) h.session.append('user/message', message)
+    for (let turn = 1; turn <= 9; turn++) h.session.append('turn/start', { turn })
+    await h.pre(9)
+    h.fail(new Error('disk full'))
+    await assert.rejects(h.call('memory', { action: 'add', content: 'failed synthetic save' }), /disk full/)
+    h.session.append('turn/start', { turn: 10 })
+    assert.ok(!(await h.pre(10)).messages.some(message => message.content[0].text.includes('<hermes-memory-nudge>')))
   })
 
   test(`${mode}: rejected pre-step delegates without memory injection`, async t => {
@@ -291,11 +345,11 @@ for (const mode of ['static', 'dynamic']) {
 
   test(`${mode}: unsuccessful memory calls do not suppress persistence nudges`, async t => {
     const h = await mount(t, mode)
-    h.session.events.push(...Array.from({ length: 11 }, () => ({ type: 'turn/start' })))
-    h.session.events.push({ type: 'tool/call', data: { name: 'memory' } })
+    for (let turn = 1; turn <= 11; turn++) h.session.append('turn/start', { turn })
+    h.session.append('tool/call', { name: 'memory', callId: 'failed-memory' })
     await h.call('memory', { action: 'remove', oldText: 'absent' })
     const failed = await h.pre(11)
-    assert.ok(failed.messages.some(message => message.content[0].text.includes('<hermes-memory-nudge>')))
+    assert.ok(!failed.messages.some(message => message.content[0].text.includes('<hermes-memory-nudge>')))
     await h.call('memory', { action: 'add', content: 'persisted' })
     assert.ok(!(await h.pre(21)).messages.some(message => message.content[0].text.includes('<hermes-memory-nudge>')))
   })
@@ -305,7 +359,7 @@ for (const mode of ['static', 'dynamic']) {
     await h.call('memory', { action: 'add', content: 'OS: Windows. Language: Chinese.' })
     assert.equal((await h.call('memory', { action: 'patch', oldText: 'Windows', content: 'Linux' })).success, true)
     assert.deepEqual((await h.call('memory_list')).memory, ['OS: Linux. Language: Chinese.'])
-    assert.equal((await h.call('memory', { action: 'replace', oldText: 'OS: Linux.', content: 'OS: macOS.' })).success, true)
+    assert.equal((await h.call('memory', { action: 'replace', oldText: 'OS: Linux. Language: Chinese.', content: 'OS: macOS.' })).success, true)
     assert.deepEqual((await h.call('memory_list')).memory, ['OS: macOS.'])
   })
 
@@ -330,3 +384,236 @@ for (const mode of ['static', 'dynamic']) {
     await assert.rejects(h.call('memory', { action: 'add', content: 'b' }), /outcome is unknown/)
   })
 }
+
+function scriptedLlm(responses) {
+  const requests = []
+  let index = 0
+  return {
+    requests,
+    async prepareCall(config, signal) {
+      return { config, async *stream(request) {
+        requests.push(request)
+        const response = responses[index++] ?? 'Nothing to save.'
+        if (typeof response === 'function') { yield* response(request); return }
+        const blocks = Array.isArray(response) ? response : [{ type: 'text', text: response }]
+        for (let i = 0; i < blocks.length; i++) yield { type: 'block-end', index: i, block: blocks[i] }
+        yield { type: 'finish', reason: { kind: blocks.some(block => block.type === 'tool-call') ? 'tool-calls' : 'stop' } }
+      } }
+    },
+  }
+}
+const memoryToolCall = (id, target, operations) => [{ type: 'tool-call', id, name: 'memory', arguments: JSON.stringify({ target, operations }) }]
+async function completeTurn(h, turn, { source = 'user', reason = 'completed', text = 'Done.', interrupted = false } = {}) {
+  await h.emit('turn/start', { turn })
+  await h.emit('user/message', { id: 'user-' + turn, role: 'user', source: { kind: source }, content: [{ type: 'text', text: 'Synthetic user evidence ' + turn }] })
+  await h.emit('assistant/message', { turn, step: 1, interrupted, message: { id: 'assistant-' + turn, role: 'assistant', source: { kind: 'model' }, content: [{ type: 'text', text }] } })
+  await h.emit('turn/end', { turn, reason: { kind: reason } })
+}
+
+test('static: background review runs at ten real user turns, independent of direct writes, and uses an isolated transcript', async t => {
+  const llm = scriptedLlm([memoryToolCall('save-1', 'memory', [{ action: 'add', content: 'Synthetic stable environment fact' }]), 'Saved.', 'Nothing to save.'])
+  const h = await mount(t, 'static', { llm })
+  for (let turn = 1; turn <= 20; turn++) {
+    if (turn === 9) await h.call('memory', { action: 'add', content: 'A main model write does not reset the review interval' })
+    await completeTurn(h, turn)
+  }
+  assert.equal(llm.requests.length, 3)
+  assert.deepEqual((await h.call('memory_list')).memory, ['A main model write does not reset the review interval', 'Synthetic stable environment fact'])
+  const request = llm.requests[0]
+  assert.equal(request.purpose, 'hermes-memory-review')
+  assert.equal(request.messages.length, 1)
+  assert.equal(request.messages[0].role, 'user')
+  assert.match(request.system, /GROUNDED/)
+  assert.deepEqual(request.tools.map(tool => tool.name), ['memory', 'memory_list'])
+  assert.deepEqual(request.tools[0].parameters.required, ['target', 'operations'])
+  assert.deepEqual(request.tools[0].parameters.properties.operations.items.required, ['action'])
+  assert.equal(h.runtime().global.reviews['session:session-test'].turn, 20)
+  assert.equal(h.projections.definition.apply(h.projections.definition.init(), { type: 'user/message', data: { role: 'user', source: { kind: 'plugin:any' } } }).userTurnCount, 0)
+})
+
+test('static: review ignores interrupted, empty, aborted and plugin-origin turns; missing LLM is explicit and deduplicated', async t => {
+  const h = await mount(t, 'static', { config: { backgroundReview: { interval: 1 } } })
+  await completeTurn(h, 1, { interrupted: true })
+  await completeTurn(h, 2, { text: '' })
+  await completeTurn(h, 3, { reason: 'aborted' })
+  await completeTurn(h, 4, { source: 'plugin:context' })
+  assert.equal(h.runtime().global, null)
+  await completeTurn(h, 5)
+  const first = h.runtime()
+  assert.equal(first.global.reviews['session:session-test'].status, 'unavailable')
+  await h.emit('turn/end', { turn: 5, reason: { kind: 'completed' } })
+  assert.deepEqual(h.runtime(), first)
+  assert.equal((await h.call('memory_debug')).backgroundReview.status, 'unavailable')
+  assert.equal((await h.call('memory', { action: 'add', content: 'Manual writes still work' })).success, true)
+})
+
+test('static: review failures consume their durable slot and retry only at a later cycle', async t => {
+  const llm = scriptedLlm([async function* () { throw new Error('synthetic model unavailable') }, 'Nothing to save.'])
+  const h = await mount(t, 'static', { llm, config: { backgroundReview: { interval: 1 } } })
+  await completeTurn(h, 1)
+  assert.equal(llm.requests.length, 1)
+  await h.emit('turn/end', { turn: 1, reason: { kind: 'completed' } })
+  assert.equal(llm.requests.length, 1)
+  await completeTurn(h, 2)
+  assert.equal(llm.requests.length, 2)
+})
+
+test('static: background patch stages an atomic durable proposal, and approval is explicit and single-use', async t => {
+  const llm = scriptedLlm([memoryToolCall('patch-1', 'memory', [{ action: 'patch', old_text: 'Windows', content: 'Linux' }, { action: 'add', content: 'Another durable fact' }]), 'Proposed.'])
+  const h = await mount(t, 'static', { llm, config: { backgroundReview: { interval: 1 } } })
+  await h.call('memory', { action: 'add', content: 'Environment uses Windows.' })
+  await completeTurn(h, 1)
+  assert.deepEqual((await h.call('memory_list')).memory, ['Environment uses Windows.'])
+  const pending = await h.call('memory_pending', { action: 'list' })
+  assert.equal(pending.pending.length, 1)
+  const proposal = pending.pending[0]
+  await assert.rejects(h.call('memory_pending', { action: 'approve', id: proposal.id }), /invalid arguments/)
+  assert.equal((await h.request('/hermes-memory/pending', { auth: false, body: { action: 'approve', id: proposal.id } })).status, 401)
+  assert.equal(proposal.provenance.sessionId, 'session-test')
+  assert.equal(proposal.pins[0].matched_entry, 'Environment uses Windows.')
+  const results = await Promise.all([h.request('/hermes-memory/pending', { body: { action: 'approve', id: proposal.id } }), h.request('/hermes-memory/pending', { body: { action: 'approve', id: proposal.id } })])
+  assert.equal(results.filter(result => result.value.success).length, 1)
+  assert.deepEqual((await h.call('memory_list')).memory, ['Environment uses Linux.', 'Another durable fact'])
+})
+
+test('static: typography-matched removal pins the whole original entry and refuses stale approval', async t => {
+  const llm = scriptedLlm([memoryToolCall('remove-1', 'memory', [{ action: 'remove', old_text: 'User uses "Windows".' }]), 'Proposed.'])
+  const h = await mount(t, 'static', { llm, config: { backgroundReview: { interval: 1 } } })
+  await h.call('memory', { action: 'add', content: 'User uses “Windows”.' })
+  await completeTurn(h, 1)
+  const proposal = (await h.call('memory_pending', { action: 'list' })).pending[0]
+  assert.equal(proposal.pins[0].matched_entry, 'User uses “Windows”.')
+  await h.call('memory', { action: 'patch', oldText: 'User uses “Windows”.', content: 'User uses “Windows”. Extra current fact.' })
+  const approved = await h.request('/hermes-memory/pending', { body: { action: 'approve', id: proposal.id } })
+  assert.equal(approved.value.success, false)
+  assert.match(approved.value.error, /stale/)
+  assert.deepEqual((await h.call('memory_list')).memory, ['User uses “Windows”. Extra current fact.'])
+})
+
+test('static: all-writes approval persists across restart, owner UI bypasses it, and orphan recovery preserves uncertainty', async t => {
+  const h = await mount(t, 'static', { config: { writeApproval: true } })
+  const staged = await h.call('memory', { action: 'add', content: 'Needs owner approval' })
+  assert.equal(staged.pending, true)
+  assert.equal(h.counters().writes, 0)
+  const savedRuntime = h.runtime().global
+  savedRuntime.reviews['session:old'] = { turn: 10, status: 'running' }
+  savedRuntime.pending[staged.pendingId].status = 'applying'
+  const restored = await mount(t, 'static', { runtime: savedRuntime, config: { writeApproval: true } })
+  const proposal = (await restored.call('memory_pending', { action: 'list' })).pending[0]
+  assert.equal(proposal.status, 'interrupted')
+  assert.equal(restored.runtime().global.reviews['session:old'].status, 'interrupted')
+  assert.equal((await restored.request('/hermes-memory/pending', { body: { action: 'approve', id: proposal.id } })).value.success, false)
+  assert.equal((await restored.request('/hermes-memory/ops', { body: { action: 'add', content: 'Explicit owner edit' } })).status, 200)
+  assert.deepEqual((await restored.call('memory_list')).memory, ['Explicit owner edit'])
+})
+
+test('static: disabled banks leave bytes intact but disappear from snapshot, schema and review writes', async t => {
+  const h = await mount(t, 'static', { snapshot: { global: null, tables: { memory: { one: record('Hidden stored memory') }, user: {} } }, config: { memoryEnabled: false } })
+  assert.deepEqual(h.tools.get('memory').parameters.properties.target.enum, ['user'])
+  assert.equal((await h.call('memory_list')).memory, undefined)
+  assert.ok(!(await h.pre()).messages[0].content[0].text.includes('Hidden stored memory'))
+  assert.equal(h.snapshot().tables.memory.one.text, 'Hidden stored memory')
+  const both = await mount(t, 'static', { config: { memoryEnabled: false, userEnabled: false } })
+  assert.equal(both.tools.has('memory'), false)
+  assert.equal((await both.pre()).messages.length, 0)
+})
+
+for (const bank of ['memory', 'user']) {
+  test(`static: disabling ${bank} hides persisted proposal contents from models while owner management retains them`, async t => {
+    const visibleBank = bank === 'memory' ? 'user' : 'memory'
+    const h = await mount(t, 'static', { config: { writeApproval: true } })
+    await h.request('/hermes-memory/ops', { body: { action: 'add', bank, content: 'Hidden bank original synthetic fact' } })
+    await h.call('memory', { target: bank, operations: [{ action: 'patch', old_text: 'original', content: 'replacement' }] })
+    await h.call('memory', { target: visibleBank, operations: [{ action: 'add', content: 'Visible bank synthetic fact' }] })
+    const runtime = h.runtime().global
+    const before = JSON.stringify(runtime)
+    const restored = await mount(t, 'static', { snapshot: h.snapshot(), runtime, config: { [bank + 'Enabled']: false } })
+    const model = await restored.call('memory_pending', { action: 'list' })
+    assert.equal(model.pendingCount, 1)
+    assert.deepEqual(model.pending.map(proposal => proposal.target), [visibleBank])
+    assert.ok(!JSON.stringify(model).includes('Hidden bank'))
+    assert.ok(!JSON.stringify(model).includes('replacement'))
+    const owner = await restored.request('/hermes-memory/pending')
+    assert.equal(owner.status, 200)
+    assert.equal(owner.value.pendingCount, 2)
+    const hidden = owner.value.pending.find(proposal => proposal.target === bank)
+    assert.equal(hidden.pins[0].matched_entry, 'Hidden bank original synthetic fact')
+    assert.equal(hidden.operations[0].content, 'replacement')
+    assert.equal(JSON.stringify(restored.runtime().global), before, 'filtering must not alter durable proposals')
+    const disabled = await mount(t, 'static', { snapshot: h.snapshot(), runtime, config: { memoryEnabled: false, userEnabled: false } })
+    assert.deepEqual(await disabled.call('memory_pending', { action: 'list' }), { success: true, pending: [], pendingCount: 0 })
+    assert.equal((await disabled.request('/hermes-memory/pending')).value.pendingCount, 2)
+  })
+}
+
+test('static: unload aborts and drains a review before closing either storage unit', async t => {
+  const entered = deferred()
+  let requestSignal
+  const llm = scriptedLlm([async function* (request) {
+    requestSignal = request.signal
+    entered.resolve()
+    await new Promise(resolve => request.signal.addEventListener('abort', resolve, { once: true }))
+    yield { type: 'finish', reason: { kind: 'aborted' } }
+  }])
+  const h = await mount(t, 'static', { llm, config: { backgroundReview: { interval: 1 } } })
+  await completeTurn(h, 1)
+  await entered.promise
+  const running = (await h.call('memory_debug')).backgroundReview
+  assert.equal(running.status, 'running')
+  assert.equal(running.active, 1)
+  assert.equal(running.error, null)
+  await h.dispose()
+  assert.equal(requestSignal.aborted, true)
+  assert.equal(h.runtime().global.reviews['session:session-test'].status, 'interrupted')
+  assert.equal(h.counters().closed, 1)
+})
+
+test('dynamic: native cancellation absence is a visible unavailable state and does not break direct tools', async t => {
+  const h = await mount(t, 'dynamic')
+  await completeTurn(h, 10)
+  const debug = await h.call('memory_debug')
+  assert.equal(debug.backgroundReview.status, 'unavailable')
+  assert.match(debug.backgroundReview.error, /supported-native-install-only/)
+  assert.equal((await h.call('memory', { action: 'add', content: 'Manual dynamic memory' })).success, true)
+})
+
+test('static: ordinary EIO after durable commit poisons the cache and reopen reads the committed truth', async t => {
+  const h = await mount(t, 'static', { commitThenThrow: true })
+  await assert.rejects(h.call('memory', { action: 'add', content: 'Committed before EIO' }), /rename committed then EIO/)
+  await assert.rejects(h.call('memory', { action: 'add', content: 'Must not overwrite it' }), /outcome is unknown/)
+  assert.equal(h.counters().writes, 1)
+  const restored = await mount(t, 'static', { snapshot: h.snapshot() })
+  assert.deepEqual((await restored.call('memory_list')).memory, ['Committed before EIO'])
+})
+
+test('static: runtime write rejection fails closed for proposals and later memory mutations', async t => {
+  const h = await mount(t, 'static', { config: { writeApproval: true }, runtimeFailure: Object.assign(new Error('runtime EIO'), { code: 'EIO' }) })
+  await assert.rejects(h.call('memory', { action: 'add', content: 'Proposal' }), /runtime EIO/)
+  await assert.rejects(h.call('memory', { action: 'add', content: 'Must not retry blindly' }), /outcome is unknown/)
+  assert.equal(h.counters().writes, 0)
+})
+
+test('static: route override discards route-specific controls, same route retains them, and flush precedes model billing', async t => {
+  const flushed = []
+  const llm = scriptedLlm(['Nothing to save.'])
+  const h = await mount(t, 'static', { llm, sessions: { async flush(session) { flushed.push(session.id); return true } }, config: { backgroundReview: { interval: 1, provider: 'override', model: 'target' } } })
+  h.session.requestHeader = () => ({ config: { provider: 'parent', model: 'source', reasoningEffort: 'high', maxTokens: 10000, temperature: 0.2 } })
+  await completeTurn(h, 1)
+  assert.deepEqual(flushed, ['session-test'])
+  assert.equal(llm.requests[0].provider, 'override')
+  assert.equal(llm.requests[0].reasoningEffort, undefined)
+  assert.equal(llm.requests[0].maxTokens, undefined)
+  assert.equal(llm.requests[0].temperature, 0.2)
+  assert.equal(llm.requests[0].messages[0].source, undefined)
+  const sameLlm = scriptedLlm(['Nothing to save.'])
+  const same = await mount(t, 'static', { llm: sameLlm, config: { backgroundReview: { interval: 1, provider: 'parent', model: 'source' } } })
+  same.session.requestHeader = h.session.requestHeader
+  await completeTurn(same, 1)
+  assert.equal(sameLlm.requests[0].reasoningEffort, 'high')
+  assert.equal(sameLlm.requests[0].maxTokens, 10000)
+  const failedLlm = scriptedLlm([])
+  const failed = await mount(t, 'static', { llm: failedLlm, sessions: { async flush() { throw new Error('synthetic flush failed') } }, config: { backgroundReview: { interval: 1 } } })
+  await completeTurn(failed, 1)
+  assert.equal(failedLlm.requests.length, 0)
+  assert.match(failed.runtime().global.reviews['session:session-test'].error, /Session flush failed/)
+})

@@ -1,18 +1,23 @@
 {
   "name": "dsh-hermes-memory",
-  "version": "1.2.0",
-  "description": "Hermes-style persistent memory for DeepSeek Harness: bounded dual banks, add/patch/replace/remove and atomic batches, frozen session snapshots, content checks, and a web panel. No additional LLM calls or external runtime dependencies.",
+  "version": "2.0.0",
+  "description": "Hermes builtin memory adapted for DeepSeek Harness: bounded dual banks, frozen snapshots, periodic background model review, atomic writes, pinned approvals, and a memory panel.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
     "./core": "./lib/core.js",
     "./client": "./lib/client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "files": [
     "lib",
+    "scripts/build-host.mjs",
+    "locale/*.json",
+    "icon.svg",
     "cordis.patch.yml",
     "host.js",
     "client.js",
@@ -20,6 +25,7 @@
     "CHANGELOG.md",
     "THIRD_PARTY_NOTICES.md",
     "docs/2026-11-09_compatibility-and-hermes-report.md",
+    "docs/2026-11-11_hermes-memory-implementation-report.md",
     "LICENSE"
   ],
   "keywords": [
@@ -38,8 +44,9 @@
     "node": "^22.19 || >=24"
   },
   "scripts": {
-    "test": "node --test tests/*.test.mjs",
-    "prepack": "npm test"
+    "build:host": "node scripts/build-host.mjs",
+    "test": "node scripts/build-host.mjs --check && node --test tests/*.test.mjs",
+    "prepack": "npm run build:host && npm test"
   },
   "dsh": {
     "bundle": {

@@ -1,149 +1,164 @@
 # dsh-hermes-memory
 
-Persistent dual-bank memory and a web panel for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH), inspired by [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent).
+将 [Hermes 内置记忆](https://github.com/NousResearch/hermes-agent/tree/c0c4357744d1a6994d332b826aea4c77fcccaf38) 的双库、冻结快照、原子策展与周期后台复盘适配到 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)。
 
-为 DSH 提供两个独立记忆库：`memory`（稳定的环境事实、项目约定）和 `user`（用户偏好与工作习惯）。模型通过 `memory` 工具维护记忆；每个会话读取一次冻结快照；网页面板可以直接查看、添加、修改和删除。插件自身不发起额外 LLM 请求，无外部运行时依赖；工具描述、快照和提醒仍会占用提示 token。
+默认每 **10 个用户对话回合**，在正常答复完成后用本轮模型进行一次独立后台复盘。复盘可以保存有依据的长期事实，也可以决定没有内容值得保存。它会产生额外模型调用；条目数不保证持续增长。后台对旧条目的修改或删除先进入待审队列，可在「记忆」面板批准或丢弃。
 
-> **1.2.0 升级说明：**第一次实际写入会将旧 v1 数据迁移为 v2 单次原子提交格式。升级前备份 `~/.dsh/storages/hermes_memory.json`。旧表保留为迁移恢复副本，v2 全局快照才是后续写入的权威数据；降级必须恢复备份，旧版插件不能读取 v2 更新。网页接口要求当前 DSH 的 owner 身份认证服务；缺少该服务时面板返回 503，工具仍可独立使用。
+当前实现基线是 Hermes `c0c4357744d1a6994d332b826aea4c77fcccaf38`（2026-11-11）。主入口是**静态 bundle**；动态沙箱没有原生请求取消接口，动态形态只提供记忆工具、快照和统计，后台状态明确显示 `unavailable`。本项目保留 DSH 的存储与生命周期接口，平台差异见下文。
 
-## 安装
+## 安装与使用
+
+在 DSH 插件管理器安装或启用此 bundle，刷新原网页，点击侧栏底部「记忆」。源码安装使用包目录；发布包可使用：
 
 ```sh
 dsh plugin --profile web add dsh-hermes-memory
-# 或从 GitHub 安装
-dsh plugin --profile web add github:isheng-eqi/dsh-hermes-memory
 ```
 
-安装后在 DSH 原网页刷新一次，侧边栏底部出现「记忆」入口。插件为所有会话提供 `memory`、`memory_search`、`memory_list`、`memory_stats` 和 `memory_debug`。
+插件需要 `tools`、`timer`、`sessionProjections` 及 JSON storage backend。Web profile 已带存储组件，不应重复声明它们。缺少存储时返回错误，不会把旧数据当空库覆盖。
 
-验证基线为 DSH **0.2.2-alpha.2**（`ce7073d512`）、Node **24.22.2**。宿主 peer 声明为 Cordis 4.x、dsh-tools `>=0.1.0-rc.6 <0.3.0-0`、Schemastery 3.x；peer 范围只表示可组合依赖，不能代替运行验证。
+已在 DSH `0.2.2-alpha.2`、Node `24.22.2` 的当前 v4 会话格式验证。包的 peer 范围不是运行兼容性保证。
 
-客户端使用 `slots.inject()` 等待 `sidebar.footer.action` 和 `shell.overlay` 的声明，再注册入口与浮层。当前 DSH 仍有此 API；直接抢先 `slots.register()` 会因槽位尚未声明而失败。网页错误、加载中和空库分别展示；失败保留草稿、编辑内容及最后成功快照，并提供重试。
+### 观察自动记忆
 
-### 没有存储的 profile
+1. 在正常对话中明确表达长期事实，例如「以后都用中文与我交流」。一次性的任务要求不会自动变成长期偏好。
+2. 主模型可随时主动保存；默认每 10 个真实用户回合还会触发后台复盘。工具调用和自动继续消息不推进用户回合计数。
+3. 打开「记忆」面板刷新数据，查看后台状态、双库内容和待审修改。后台新增可直接保存，旧条目的修改与删除需要审核。
+4. 当前会话保持首次读取的冻结快照。新会话会读取更新后的记忆；需要读取即时状态可调用 `memory_list`。
 
-Web bundle 自带 `storage`、`storage-json`、`storage-domain`，本插件不重复声明这些行。Headless/TUI 或 base-only profile 需要在自己的配置补充：
+后台只提供 `memory` 和 `memory_list` 两个工具，最多 16 次模型请求，不具有文件、网络、执行命令或批准提案的权限。取消、异常、空答复、含未完成工具调用的答复不触发自动复盘；普通子代理不触发自动复盘。插件卸载会中止请求，并等待已经开始的写入落定。
+
+### 两个记忆库
+
+| 目标 | 用途 | 默认容量 |
+| --- | --- | --- |
+| `user` | 用户身份、长期偏好、交流方式与明确的常设期望 | 1375 字符 |
+| `memory` | 跨任务适用的环境事实、工具约定、路径与稳定配置 | 2200 字符 |
+
+一条事实只进入一个库。临时进度、完成日志、TODO 留在会话历史；流程、技巧和特定任务的习惯属于 skills。此插件不会自动修改技能文件。
+
+预算按 Unicode 码点计算，条目间分隔符 `\n§\n` 也计入；单个 `😀` 计 1。超限不会自动截断已有条目。
+
+## 调用工具
+
+模型可见的 `memory` 接口只有必填的 `target` 与 `operations`。每次只写一个库；批次先验证所有操作与最终预算，再一次性落盘。
+
+```json
+{"target":"user","operations":[{"action":"add","content":"用户偏好用中文交流。"}]}
+```
+
+```json
+{"target":"memory","operations":[{"action":"patch","old_text":"Node 24","content":"Node 26"}]}
+```
+
+```json
+{"target":"memory","operations":[{"action":"remove","old_text":"旧的完整条目"},{"action":"add","content":"更新后的稳定环境事实。"}]}
+```
+
+- `add` 添加并去重；前后空白会被清理。
+- `patch` 只替换唯一、精确的 `old_text` 片段，保留同条目的其他事实与空白。整条更新使用完整旧条目作为 `old_text`。
+- `remove` 定位并删除整条。先匹配完整原文，再匹配唯一片段；定位兼容常见引号、横线和空白差异，但 `patch` 修改的片段仍须精确且唯一。
+- 多操作 consolidation 不得清空原本非空的库；单个明确的 `remove` 可以删除最后一条。删除操作允许逐步修复原本超限的库。
+- 旧的顶层 `action`、`oldText`、`new_text` 仍由内部兼容层处理。模型接口不再暴露 `replace`；网页编辑保留整条更新能力。
+
+`memory_list` 读取当前库；`memory_search` 是双库内的确定性关键词检索，**不搜索聊天历史**；`memory_stats` 查看容量与后台状态；`memory_debug` 查看存储与后台诊断。连续失败会返回停止重试提示，成功后不会重复保存同一更新。
+
+`memory_pending` 只允许模型列出提案。批准、丢弃必须由已登录用户在记忆面板执行，模型不能自行审批，后台复盘也不能访问审批工具。审批会重新验证完整原条目及身份；原条目变化后拒绝使用旧提案覆盖新内容。
+
+## 配置后台复盘
+
+通过 DSH 的配置界面或配置编辑服务修改 `hermes-memory` 条目。常用配置：
 
 ```yaml
-- insert:
-    - id: storage
-      name: '@deepseek-ai/dsh-storage'
-    - id: storage-json
-      name: '@deepseek-ai/dsh-storage-json'
-      config:
-        root: !!js dshHomePath('storages')
-    - id: storage-domain
-      name: '@deepseek-ai/dsh-storage-domain'
-      config:
-        backend: json
+memoryCharLimit: 2200
+userCharLimit: 1375
+memoryEnabled: true
+userEnabled: true
+nudgeInterval: 10
+contentGuard: true
+writeApproval: false
+backgroundReview:
+  enabled: true
+  maxIterations: 16
+  timeoutMs: 120000
 ```
 
-无 JSON 后端时，工具返回存储不可用；不会把读取失败显示成空库或覆盖已有数据。
-
-### 动态插件
-
-也可通过 DSH `cordis_define` / `cordis_run` 使用 [host.js](host.js) 与 [client.js](client.js)。动态插件提供统计 Run 卡，随进程退出而卸载，持久数据保留。动态形态使用硬编码默认预算、提醒间隔和内容检查；需要配置时使用 bundle。
-
-**静态 bundle 与动态实例共用同名存储单元，只能启用一个写入实例。**重复打开时拒绝接管其他实例的句柄。不要用多个 DSH 进程同时写同一个存储目录，也不要在进程运行时手改文件：插件写队列保证单实例内的并发，未提供跨进程 CAS/合并。
-
-## 使用工具
-
-默认 `memory` 库预算 **2200** 字符，`user` 库 **1375** 字符，条目以 `\n§\n` 分隔并计入预算。按 Unicode 码点计数，与 Python `len()` 一致；单个 `😀` 计 1，组合字符按各自码点计数。
-
-| 参数 | 说明 |
+| 字段 | 说明 |
 | --- | --- |
-| `action` | `add`、`patch`、`replace`、`remove` 或 `batch`，必填 |
-| `target` | `memory` 或 `user`；为兼容旧版默认 `memory` |
-| `content` | add 的完整条目、patch 的新片段、replace 的完整替换条目 |
-| `oldText` | patch 的精确片段；replace/remove 用于定位条目的文本 |
-| `operations` | batch 的操作数组，每项支持 add/patch/replace/remove |
+| `memoryEnabled` / `userEnabled` | 分别关闭库的模型读取、快照与写入，保留磁盘数据供管理 |
+| `nudgeInterval` | 兼容旧配置名，现在表示后台复盘的用户回合周期；`0` 关闭周期触发 |
+| `backgroundReview.interval` | 可覆盖 `nudgeInterval` |
+| `backgroundReview.enabled` | `false` 关闭自动复盘，主模型仍可保存记忆 |
+| `backgroundReview.provider` / `model` | 一起设置以使用独立复盘模型；省略时继承本轮实际模型及参数 |
+| `backgroundReview.maxIterations` | 1–16，最多模型请求数 |
+| `backgroundReview.timeoutMs` | 后台请求总时间预算，默认 120 秒 |
+| `writeApproval` | `true` 时主模型写入也先进入待审队列；用户在面板上的直接编辑仍可保存 |
+| `contentGuard` | 对新内容应用本地有界扫描，加载命中的旧条目只在提示中隐藏原文 |
 
-```json
-{"action":"add","target":"memory","content":"项目使用 Node 24。"}
+指定其他复盘模型时，旧模型的 reasoning effort 和输出 token 上限不会强加给新模型，而采用目标适配器默认值。后台出错不会让正常聊天失败。失败状态可见；同一触发轮次不会在重载后重复扣费重跑，后续周期可再次尝试。
+
+## 保存与恢复
+
+记忆仍由 DSH JSON KvUnit 保存在 `~/.dsh/storages/hermes_memory.json`。v1 记录首次变化时写入 v2 原子全局快照：
+
+```text
+global: { format: 2, tables: { memory, user } }
 ```
 
-```json
-{"action":"patch","target":"memory","oldText":"Node 24","content":"Node 26"}
-```
+原 v1 表保留为恢复副本，后续读取以 v2 快照为准。降级旧版前应备份数据；旧版无法读取 v2 的后续更新。
 
-`patch` 保留同条目中的其他事实，只修改唯一的一处文本；重复片段、多个条目命中或无变化会报错。`replace` 保留旧版整条替换语义，面板编辑也使用它。定位时先精确匹配整个条目，再回退唯一子串；不确定时先调用 `memory_list`。
+新增 `~/.dsh/storages/hermes_memory_runtime.json` 保存复盘触发记录、结果和待审提案，不把元数据塞进主会话。重载发现未完成复盘时标为中断；审批写入处于不确定阶段时不自动重放。存储发布出现任何异常后停止继续写入，重新加载插件、重新读取磁盘后才能恢复判断。
 
-```json
-{"action":"batch","target":"memory","operations":[{"action":"remove","oldText":"项目使用 Node 26。"},{"action":"add","content":"项目已迁移到 Node 28。"}]}
-```
+静态与动态插件共用同名存储，只能保留一个写入实例。写队列与 storage hub 保证单个宿主内的顺序；不支持多个 DSH 进程同时写同一目录，也不支持运行中从外部直接改文件。此限制对应 DSH 当前存储契约，与 Hermes 原生文件锁不同。
 
-批操作先在副本上验证最终预算，再一次性提交两个库的完整快照。任一操作失败或持久化失败，不发布新内存状态；可在同一批次腾出空间再新增。每个模型回合超过 3 次合并失败会收到停止重试提示；UI 失败不参与该上限。重复 add 去重。
-
-`memory_search` 为本地确定性关键词检索，不访问模型或向量服务。`memory_list` 列出当前数据；`memory_stats` 显示预算；`memory_debug` 只报告存储句柄和加载状态。
-
-## 冻结快照与内容检查
-
-首个可执行模型步骤等待存储初始化与已有写入，再把记忆注入带插件 source 的 durable user 消息。空库也记录已冻结标记：会话中新增记忆不会改变该会话已注入的前缀，新会话读取更新后的内容。每 10 轮未成功保存时可提醒一次；提示只是建议，不会启动后台模型复盘。
-
-默认内容检查参考 Hermes 的确定性 threat patterns，限制扫描长度、规范化 NFKC，检查常见指令注入和秘密外传特征；允许正常 ZWJ emoji 与自然语言。新写入命中时整批拒绝；磁盘已有条目命中时仅在提示快照中显示占位符，原文保留在面板供查看、编辑和删除。标签转义保护提示框架。
-
-这些规则是启发式检查，可能漏报或误报，不构成完整的提示注入防护。静态配置可用 `contentGuard: false` 关闭，动态默认开启。
-
-### 配置
-
-在 profile 对 `hermes-memory` 条目合并配置：
-
-```yaml
-- id: hermes-memory
-  config:
-    memoryCharLimit: 2200
-    userCharLimit: 1375
-    nudgeInterval: 10
-    contentGuard: true
-```
-
-`nudgeInterval: 0` 关闭提醒。字符上限不会自动淘汰条目；调低预算后仍允许列出旧数据，再用批操作压缩。
-
-## 持久化与网页接口
-
-存储位置为 `~/.dsh/storages/hermes_memory.json`，由 DSH storage hub 的 JSON KvUnit 管理。插件读取 v1 表结构，首次变化写入 v2 `global: {format:2,tables:{memory,user}}`；旧表作为恢复副本保留。每批仅一次 `setGlobal`，成功后才更新缓存；重复身份或损坏数据拒绝加载。写入返回 `unknown-state` 后拒绝继续操作，重新加载插件才能恢复判断。
-
-卸载会等待初始化及已执行写链完成，然后关闭自己拥有的句柄。另一个实例的句柄不会被强制关闭。
+网页 API 使用 DSH owner 身份认证及 Host/Origin 检查，响应禁止缓存：
 
 | 路径 | 方法 | 用途 |
 | --- | --- | --- |
-| `/hermes-memory/stats` | GET | 统计与 ready 状态 |
-| `/hermes-memory/ops` | POST | list/add/patch/replace/remove/batch |
+| `/hermes-memory/stats` | GET | ready、容量、后台状态 |
+| `/hermes-memory/ops` | POST | 读取双库、直接编辑；list 包含待审提案与后台状态 |
+| `/hermes-memory/pending` | GET / POST | 列出提案；批准或丢弃指定 id |
 
-接口复用 DSH `connection.requestRejection()`：要求 owner 登录，校验 Host/Origin，响应禁止缓存。401 表示重新打开 DSH 的认证入口；403 表示来源不可信；503 表示认证服务不可用，或统计接口暂时无法读取存储；操作接口的存储异常返回 500。POST 要求 JSON 对象和合法 bank。浏览器代码检查 HTTP 状态、业务失败和响应结构，失败不显示为成功空库。
+401 要重新通过 DSH 登录入口打开网页；503 表示认证或存储服务不可用。操作失败会保留草稿、最后成功快照及待审提案，不显示虚假的空库或保存成功。
 
-## 与最新 Hermes 的对应关系
+## 对照范围
 
-本次核对上游 `NousResearch/hermes-agent` **`0f0e96fc8e7fd35aba406e4a9fa341fb969d0b41`**（2026-11-08；release 基线 v0.23.0），细节见 [对比与验证记录](docs/2026-11-09_compatibility-and-hermes-report.md)。
-
-| 机制 | 本插件 |
+| Hermes 机制 | DSH 实现 |
 | --- | --- |
-| 双库、字符预算、手工策展 | 保留，使用 DSH 原生 JSON 持久化 |
-| 冻结快照、唯一片段 patch、Unicode 字符计数 | 已实现，并兼容旧 replace |
-| 写入检查与加载后提示占位 | 本地规则适配，非上游扫描器的逐行为等价实现 |
-| 文件锁、重读外部修改 | 使用单实例写队列及 storage hub；不提供跨进程合并 |
-| 两库独立 enabled 开关、显式必填 target | 保留旧插件两库常开、target 默认 memory |
-| 禁止 consolidation 清空原非空库 | 插件允许用户明确 remove/batch 清空 |
-| 可选写入审批、session_search、外部 provider | 未集成 |
-| 自动后台复盘、LLM extraction | 不默认引入；插件自身不增加 LLM 调用 |
+| 双库、默认预算、独立开关、必填目标、原子 operations | 已适配 |
+| 冻结快照、Unicode 码点、唯一片段 patch、清空保护 | 已适配，使用 v4 producer-owned 消息来源 |
+| 默认每 10 用户回合、正常答复后的后台模型复盘 | 已适配，独立受限模型循环，最多 16 次请求 |
+| grounded facts、禁止凭话题推断用户特征、skills 优先 | 主提示与后台提示采用固定基线策略 |
+| 后台修改/删除待审及完整原条目固定 | 已适配；只允许已登录用户在 DSH 面板批准或丢弃 |
+| 外部 provider、skills 自动维护、原生 session_search | 不属于本插件的双库实现；聊天检索使用宿主能力 |
+| 原生 threat scanner | 保留本地有界启发式适配，未宣称逐条等价，可能漏报或误报 |
+| 文件锁、跨进程重读 | 改为 DSH 单写入实例、串行写队列及原子 KvUnit |
+| 完整后台 agent fork | 改为隔离的 `llm.prepareCall` 循环，无新主会话、无递归 |
+| 主会话 fork 的复盘计数 | DSH 从继承历史重建计数；保留父会话已累计用户回合，不按新 agent 从零计数 |
+| 动态 VM 后台请求 | 当前宿主未提供原生取消控制器；明确不可用，使用静态 bundle |
 
-## 开发验证
+当前验证结果与适配边界见 [2.0.0 实现与验证记录](docs/2026-11-11_hermes-memory-implementation-report.md)。历史的 [1.2.0 对比记录](docs/2026-11-09_compatibility-and-hermes-report.md) 保留当时的范围，不作为当前版本能力说明。
+
+## 开发与验证
+
+源码分为纯规则、提示词、后台模型循环、调度与宿主集成。`host.js` 由这些模块生成，禁止手工维护另一份实现。
 
 ```sh
-npm install
+npm run build:host
 npm test
 npm pack --dry-run
 ```
 
-默认测试覆盖纯函数、两套 Host、客户端错误/竞态和迁移；额外两项真实 DSH 测试需要指定本机 checkout：
+真实 DSH 测试需指定已构建 checkout；不指定时对应测试会跳过：
 
 ```powershell
-$env:DSH_CLIENT_TEST_CHECKOUT='C:\Users\HI\deepseek-harness'
-npm test
+$env:DSH_CLIENT_TEST_CHECKOUT=Join-Path $env:USERPROFILE 'deepseek-harness'
+node --test tests/*.test.mjs
 ```
 
-测试只使用临时目录和合成数据，不改真实记忆。修改 [lib/core.js](lib/core.js) 或 [lib/index.js](lib/index.js) 时同步 [host.js](host.js)，两套客户端各有覆盖。
+测试使用临时目录与合成数据，覆盖真实 v4 编码、普通 JSONL / Zstandard 关闭再打开、真实 JSON KvUnit、原生与动态 VM、模型适配器、后台触发、并发、审批和存储失败。不会将合成事实写入用户的实际记忆库。
+
+主对话新增 guidance 964 个 Unicode 字符；memory 工具说明与参数相较旧版约增加 51 字符。后台专用 review 提示 1477 字符，仅在复盘请求中发送。这是字符计数，实际 token 与费用取决于模型 tokenizer、对话长度及请求次数。
 
 ## License
 
-MIT。内容检查部分参考 NousResearch/hermes-agent 的 MIT 实现，归属见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+MIT。Hermes 原始设计、提示与规则的归属见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。图标为本项目原创 SVG。

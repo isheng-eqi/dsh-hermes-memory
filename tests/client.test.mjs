@@ -180,6 +180,30 @@ for (const [name, value] of [
   })
 }
 
+test('static: review status and pending approvals remain explicit and serialize user actions', async () => {
+  const write = deferred()
+  const payload = { ...list(), backgroundReview: { enabled: true, interval: 10, status: 'completed' },
+    pending: [{ id: 'synthetic-pending', target: 'user', operations: [{ action: 'patch', oldText: 'old synthetic preference', content: 'new synthetic preference' }] }] }
+  const h = fixture(async (path, init) => path === '/hermes-memory/pending' ? write.promise : response(payload))
+  h.show()
+  await tick()
+  let tree = h.render()
+  assert.match(text(tree), /每 10 轮用户对话/)
+  assert.match(text(tree), /待审修改 · 1/)
+  assert.match(text(tree), /old synthetic preference/)
+  assert.match(text(tree), /new synthetic preference/)
+  const approve = button(tree, '批准').props.onClick
+  approve(); approve()
+  assert.equal(h.calls.filter(([path]) => path === '/hermes-memory/pending').length, 1)
+  assert.deepEqual(JSON.parse(h.calls.at(-1)[1].body), { action: 'approve', id: 'synthetic-pending' })
+  write.resolve(response({ success: false, error: 'Synthetic original entry changed' }))
+  await tick()
+  tree = h.render()
+  assert.match(text(tree), /Synthetic original entry changed/)
+  assert.match(text(tree), /待审修改 · 1/)
+  assert.equal(button(tree, '批准').props.disabled, false)
+})
+
 test('static: failed add/edit retain the draft and editor; successful retry clears them', async () => {
   let succeed = false
   const h = fixture(async (_path, init) => JSON.parse(init.body).action === 'list'
