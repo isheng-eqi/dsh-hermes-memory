@@ -304,6 +304,26 @@ for (const mode of ['static', 'dynamic']) {
     assert.deepEqual((await h.call('memory_list')).memory, ['synthetic 😀 on Linux'])
   })
 
+  for (const action of ['remove', 'replace']) {
+    test(`${mode}: stale panel ${action} does not target a different entry`, async t => {
+      const h = await mount(t, mode)
+      const post = body => h.request('/hermes-memory/ops', { body })
+      assert.equal((await post({ action: 'add', content: 'Node 24' })).status, 200)
+      assert.equal((await post({ action: 'add', content: 'CI uses Node 24' })).status, 200)
+      const stale = (await post({ action: 'list' })).value.memory[0]
+      assert.equal(stale, 'Node 24')
+      assert.equal((await post({ action: 'remove', oldText: stale })).status, 200)
+
+      const result = await post({ action, oldText: stale, content: 'Node 26' })
+      assert.equal(result.status, 422)
+      assert.match(result.value.error, /entry changed.*refresh/i)
+      assert.deepEqual((await post({ action: 'list' })).value.memory, ['CI uses Node 24'])
+
+      assert.equal((await post({ action, oldText: 'CI uses Node 24', content: 'Node 26' })).status, 200)
+      assert.deepEqual((await post({ action: 'list' })).value.memory, action === 'remove' ? [] : ['Node 26'])
+    })
+  }
+
   test(`${mode}: duplicate sequence identity fails closed without changing the medium`, async t => {
     const h = await mount(t, mode, { snapshot: { global: null, tables: { memory: { a: record('alpha'), b: record('beta') }, user: {} } } })
     const before = h.snapshot()

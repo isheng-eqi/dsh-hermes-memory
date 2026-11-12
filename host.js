@@ -180,7 +180,7 @@ function consolidationFailure(failures, max, bank, response, sessionId) {
  * 污染（跳号虽不破坏正确性，但保持"失败无副作用"更干净）。提交成功后由
  * 调用方把 `seqCounter.next - 1` 写回全局 seq。
  */
-function stepOperation(working, op, pos, seqCounter) {
+function stepOperation(working, op, pos, seqCounter, exactEntry = false) {
   const content = op.action === 'patch' ? str(op.content) : str(op.content).trim()
   const oldText = op.action === 'patch' ? str(op.oldText ?? op.old_text) : str(op.oldText ?? op.old_text).trim()
   if (op.action === 'add') {
@@ -194,9 +194,11 @@ function stepOperation(working, op, pos, seqCounter) {
   // 子串——回归：条目 "11" 曾被其他含 "11" 的条目干扰而无法删除/编辑）；
   // 无精确命中时回退 Hermes 原版子串语义（模型 memory 工具行为不变）。
   const pinned = op.matched_entry !== undefined
-  const matches = pinned
-    ? working.map((entry, index) => ({ entry, index })).filter(({ entry }) => entry.text === op.matched_entry)
-    : findEntryMatches(working, oldText)
+  const expectedEntry = exactEntry ? (op.oldText ?? op.old_text) : op.matched_entry
+  const matches = expectedEntry === undefined
+    ? findEntryMatches(working, oldText)
+    : working.map((entry, index) => ({ entry, index })).filter(({ entry }) => entry.text === expectedEntry)
+  if (exactEntry && matches.length === 0) return pos + ': the entry changed or was removed. Refresh the memory list and try again.'
   if (matches.length === 0) return pinned
     ? `${pos}: the entry changed since approval was requested; nothing was applied.`
     : `${pos}: no entry matched '${oldText}'.`
@@ -1069,7 +1071,7 @@ async function apply(ctx, config) {
         const matched = findEntryMatches(working, needle).map(match => match.entry)
         if (matched.length && new Set(matched.map(record => record.text)).size === 1) pins.push({ operation: i, seq: matched[0].seq, matched_entry: matched[0].text })
       }
-      const failure = stepOperation(working, op, `Operation ${i + 1} (${op.action})`, seqCounter)
+      const failure = stepOperation(working, op, `Operation ${i + 1} (${op.action})`, seqCounter, options.exactEntry)
       if (failure !== null) {
         return consolidationFailure(failures, MAX_CONSOLIDATION_FAILURES, bank, {
           success: false,
@@ -1583,7 +1585,10 @@ async function apply(ctx, config) {
             return
           }
           if (op !== null) {
-            const out = await applyBatch(bank, [op], 'ui', { owner: true })
+            // The panel sends the full original entry. A stale row must never
+            // fall back to a substring match against another entry.
+            const exactEntry = op.action === 'replace' || op.action === 'remove'
+            const out = await applyBatch(bank, [op], 'ui', { owner: true, exactEntry })
             json(res, out.success ? 200 : 422, out)
           } else if (input.action === 'list') {
             json(res, 200, {
