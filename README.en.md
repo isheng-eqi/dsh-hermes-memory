@@ -191,13 +191,13 @@ node --test tests/*.test.mjs
 
 The tests use temporary directories and synthetic data. They cover real v4 encoding, closing and reopening plain JSONL and Zstandard sessions, real JSON KvUnits, native and dynamic VM integration, model adapters, review triggers, concurrency, approvals, and storage failures. Synthetic facts are not written into the actual user memory banks.
 
-Before release, use the [strict pinned-host check](docs/host-release-verification.md), which requires the specified revision, clean sources, rebuilt artifacts, and every test passing with zero skips. Ordinary `npm test` success does not replace this evidence. The generator accepts LF and Windows CRLF checkouts while still rejecting stale dynamic mirrors.
+Before release, use the [strict pinned-host check](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/docs/host-release-verification.md), which requires the specified revision, clean sources, rebuilt artifacts, and every test passing with zero skips. Ordinary `npm test` success does not replace this evidence. The generator accepts LF and Windows CRLF checkouts while still rejecting stale dynamic mirrors.
 
-Focused tools and their scope:
+Run these development tools from a source checkout of this repository; they are not included in the installed plugin package:
 
-- [Pinned offline Hermes cases](docs/upstream-compatibility.md): ten traceable scenarios compare selected behaviors. DSH JSON and Hermes Markdown remain different disk formats, and offline tests do not monitor newer upstream changes.
-- [Synthetic memory quality scorer](eval/memory-quality/README.md): scores existing outputs; scorer regression success does not establish model quality.
-- [Synthetic resource characterization](docs/resource-characterization.md): observes scheduler, review, storage calls and disposal. Its two-million UTF-16-unit cap covers cumulative user evidence across phases, not complete requests or production resource limits.
+- [Pinned offline Hermes cases](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/docs/upstream-compatibility.md): ten traceable scenarios compare selected behaviors. DSH JSON and Hermes Markdown remain different disk formats, and offline tests do not monitor newer upstream changes.
+- [Synthetic memory quality scorer](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/eval/memory-quality/README.md): scores existing outputs; scorer regression success does not establish model quality.
+- [Synthetic resource characterization](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/docs/resource-characterization.md): observes scheduler, review, storage calls and disposal. Its two-million UTF-16-unit cap covers cumulative user evidence across phases, not complete requests or production resource limits.
 
 The main-chat guidance contains 964 Unicode code points. The memory tool description and parameters add approximately 51 characters compared with the previous version. The background-specific review prompt contains 1477 code points and is sent only in review requests. These are character counts; actual token usage and cost depend on the model tokenizer, conversation length, and request count.
 

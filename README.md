@@ -191,13 +191,13 @@ node --test tests/*.test.mjs
 
 测试使用临时目录与合成数据，覆盖真实 v4 编码、普通 JSONL / Zstandard 关闭再打开、真实 JSON KvUnit、原生与动态 VM、模型适配器、后台触发、并发、审批和存储失败。不会将合成事实写入用户的实际记忆库。
 
-发布前使用[固定宿主严格检查](docs/host-release-verification.md)，要求指定 SHA、干净源码、完整构建以及全部测试通过、零跳过。普通 `npm test` 的通过不能代替这项证据。生成器支持 LF 与 Windows CRLF 检出，仍拒绝真正过期的动态镜像。
+发布前使用[固定宿主严格检查](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/docs/host-release-verification.md)，要求指定 SHA、干净源码、完整构建以及全部测试通过、零跳过。普通 `npm test` 的通过不能代替这项证据。生成器支持 LF 与 Windows CRLF 检出，仍拒绝真正过期的动态镜像。
 
-专项工具与范围：
+以下开发工具从本仓库的源码检出运行，不包含在插件安装包中：
 
-- [固定 Hermes 离线样例](docs/upstream-compatibility.md)：10 个可追溯场景，比较选定行为；DSH JSON 与 Hermes Markdown 仍是不同磁盘格式，离线测试不监测最新上游。
-- [合成记忆质量评分器](eval/memory-quality/README.md)：对已有输出评分，评分器回归通过不代表模型质量达标。
-- [合成资源特征测量](docs/resource-characterization.md)：观察调度、复盘、存储调用及卸载；200 万 UTF-16 单元上限只覆盖全部阶段累计用户证据，不是完整请求或生产资源上限。
+- [固定 Hermes 离线样例](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/docs/upstream-compatibility.md)：10 个可追溯场景，比较选定行为；DSH JSON 与 Hermes Markdown 仍是不同磁盘格式，离线测试不监测最新上游。
+- [合成记忆质量评分器](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/eval/memory-quality/README.md)：对已有输出评分，评分器回归通过不代表模型质量达标。
+- [合成资源特征测量](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/docs/resource-characterization.md)：观察调度、复盘、存储调用及卸载；200 万 UTF-16 单元上限只覆盖全部阶段累计用户证据，不是完整请求或生产资源上限。
 
 主对话新增 guidance 964 个 Unicode 字符；memory 工具说明与参数相较旧版约增加 51 字符。后台专用 review 提示 1477 字符，仅在复盘请求中发送。这是字符计数，实际 token 与费用取决于模型 tokenizer、对话长度及请求次数。
 
