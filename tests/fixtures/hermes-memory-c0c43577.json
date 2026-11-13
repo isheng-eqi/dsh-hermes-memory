@@ -1,0 +1,182 @@
+{
+  "fixtureVersion": 1,
+  "upstream": {
+    "repository": "https://github.com/NousResearch/hermes-agent",
+    "commit": "c0c4357744d1a6994d332b826aea4c77fcccaf38",
+    "retrievedOn": "2026-11-13",
+    "license": "MIT",
+    "copyright": "Copyright (c) 2025 Nous Research",
+    "sources": [
+      { "path": "tools/memory_tool_store.py", "sha256": "0f665c95fcf44e3115c7a625622885e20254418b414a92a1f8570d1300e9fc31" },
+      { "path": "tests/tools/test_memory_tool.py", "sha256": "4b9ff9b39d353f2cff048254a43f14092035649f5b52759e8592648513e93bd3" },
+      { "path": "tests/tools/test_memory_patch_action.py", "sha256": "c2867a90acd989db944f67f77762c6d0b0fe809d5914677e02ba973547b40d18" },
+      { "path": "tests/tools/test_memory_target_contract.py", "sha256": "e37df6212e0e7fe12aee2d9aee37f600ec8b0f75b0049c47fab9dad0c5c524a2" },
+      { "path": "LICENSE", "sha256": "821556e6336796450ab852d375117b48a4887e71d255794fd6318d99982a5ab6" }
+    ]
+  },
+  "defaults": { "memory": 2200, "user": 1375, "entryDelimiter": "\n§\n" },
+  "cases": [
+    {
+      "id": "default-bank-limits",
+      "provenance": [
+        { "kind": "upstream-test", "path": "tests/tools/test_memory_tool.py", "function": "TestMemoryStoreAdd.test_add_entry" },
+        { "kind": "implementation-derived", "path": "tools/memory_tool_store.py", "symbols": ["MemoryStore.__init__", "MemoryStore._char_count"] }
+      ],
+      "adaptation": "Use the upstream add examples through DSH operations; leave limits unset to check the constructor defaults, not the upstream test fixture's 500/300 overrides.",
+      "limits": { "memory": 2200, "user": 1375 },
+      "calls": [
+        {
+          "input": { "target": "memory", "operations": [{ "action": "add", "content": "Python 3.12 project" }] },
+          "expected": { "success": true, "writes": 1, "entries": { "memory": ["Python 3.12 project"], "user": [] }, "chars": { "memory": 19, "user": 0 } }
+        },
+        {
+          "input": { "target": "user", "operations": [{ "action": "add", "content": "Name: Alice" }] },
+          "expected": { "success": true, "writes": 2, "entries": { "memory": ["Python 3.12 project"], "user": ["Name: Alice"] }, "chars": { "memory": 19, "user": 11 } }
+        }
+      ]
+    },
+    {
+      "id": "unicode-delimiter-budget",
+      "provenance": [
+        { "kind": "upstream-test", "path": "tests/tools/test_memory_tool.py", "function": "TestMemoryStoreAdd.test_overflow_returns_consolidation_context" },
+        { "kind": "implementation-derived", "path": "tools/memory_tool_store.py", "symbols": ["ENTRY_DELIMITER", "MemoryStore._char_count", "MemoryStore._batch"] }
+      ],
+      "adaptation": "New boundary inputs derived from Python len(delimiter.join(entries)); the upstream overflow test does not contain these Unicode examples. Astral characters count once; combining marks count separately; each separator costs three codepoints.",
+      "config": { "memoryCharLimit": 6 },
+      "calls": [
+        {
+          "input": { "target": "memory", "operations": [{ "action": "add", "content": "😀" }, { "action": "add", "content": "é" }] },
+          "expected": { "success": true, "writes": 1, "entries": { "memory": ["😀", "é"], "user": [] }, "chars": { "memory": 6, "user": 0 }, "rendered": { "memory": "😀\n§\né" } }
+        },
+        {
+          "input": { "target": "memory", "operations": [{ "action": "add", "content": "中" }] },
+          "expected": { "success": false, "writes": 1, "entries": { "memory": ["😀", "é"], "user": [] }, "chars": { "memory": 6, "user": 0 } }
+        }
+      ]
+    },
+    {
+      "id": "patch-unique-span-preserves-sibling-facts",
+      "provenance": [
+        { "kind": "upstream-test", "path": "tests/tools/test_memory_patch_action.py", "function": "TestPatchStoreLevel.test_patch_rejects_a_span_repeated_within_the_entry" }
+      ],
+      "adaptation": "Replay the ambiguous span and the corrected longer span as successive public operations calls; compare final entry text instead of Hermes-specific response fields.",
+      "initial": { "memory": ["Jeff drinks tea in the morning; his wife drinks tea at night"], "user": [] },
+      "calls": [
+        {
+          "input": { "target": "memory", "operations": [{ "action": "patch", "old_text": "tea", "content": "coffee" }] },
+          "expected": { "success": false, "writes": 0, "entries": { "memory": ["Jeff drinks tea in the morning; his wife drinks tea at night"], "user": [] } }
+        },
+        {
+          "input": { "target": "memory", "operations": [{ "action": "patch", "old_text": "drinks tea in the morning", "content": "drinks coffee in the morning" }] },
+          "expected": { "success": true, "writes": 1, "entries": { "memory": ["Jeff drinks coffee in the morning; his wife drinks tea at night"], "user": [] } }
+        }
+      ]
+    },
+    {
+      "id": "patch-span-whitespace",
+      "provenance": [
+        { "kind": "upstream-test", "path": "tests/tools/test_memory_patch_action.py", "function": "test_patch_spans_keep_their_whitespace" }
+      ],
+      "adaptation": "Combine both upstream parameter rows into one two-op batch; preserve trailing whitespace in both old_text and content.",
+      "initial": { "memory": ["Jeff drinks tea tonight", "Lives in NewYork"], "user": [] },
+      "calls": [
+        {
+          "input": { "target": "memory", "operations": [{ "action": "patch", "old_text": "tea ", "content": "coffee " }, { "action": "patch", "old_text": "New", "content": "New " }] },
+          "expected": { "success": true, "writes": 1, "entries": { "memory": ["Jeff drinks coffee tonight", "Lives in New York"], "user": [] } }
+        }
+      ]
+    },
+    {
+      "id": "patch-overlapping-repeat",
+      "provenance": [
+        { "kind": "upstream-test", "path": "tests/tools/test_memory_patch_action.py", "function": "test_patch_rejects_an_overlapping_repeat" }
+      ],
+      "adaptation": "Use the upstream batch parameter row: 00 occurs twice in 1000, including the overlapping occurrence.",
+      "initial": { "memory": ["Timeout 1000 ms"], "user": [] },
+      "calls": [
+        {
+          "input": { "target": "memory", "operations": [{ "action": "patch", "old_text": "00", "content": "5" }] },
+          "expected": { "success": false, "writes": 0, "entries": { "memory": ["Timeout 1000 ms"], "user": [] } }
+        }
+      ]
+    },
+    {
+      "id": "patch-requires-exact-stored-span",
+      "provenance": [
+        { "kind": "upstream-test", "path": "tests/tools/test_memory_tool.py", "function": "TestMemoryStoreReplace.test_layout_and_retyped_typography_match_but_punctuation_never_does" },
+        { "kind": "implementation-derived", "path": "tools/memory_tool_store.py", "symbols": ["MemoryStore._locate", "_patch_entry"] }
+      ],
+      "adaptation": "Reuse an upstream typography/line-wrap example but change whole-entry replace to patch: folded entry location is insufficient when the literal patch span is absent; upstream _patch_entry rejects the resulting no-op.",
+      "initial": { "memory": ["Tests: run ‘make test’ (needs\n  docker up)"], "user": [] },
+      "calls": [
+        {
+          "input": { "target": "memory", "operations": [{ "action": "patch", "old_text": "run 'make test' (needs\\n docker up)", "content": "run make test-fast" }] },
+          "expected": { "success": false, "writes": 0, "entries": { "memory": ["Tests: run ‘make test’ (needs\n  docker up)"], "user": [] } }
+        }
+      ]
+    },
+    {
+      "id": "batch-budget-checked-only-at-end",
+      "provenance": [
+        { "kind": "upstream-test", "path": "tests/tools/test_memory_tool.py", "function": "TestMemoryBatch.test_batch_add_and_remove_atomic" },
+        { "kind": "implementation-derived", "path": "tools/memory_tool_store.py", "symbols": ["MemoryStore._batch"] }
+      ],
+      "adaptation": "Move the upstream add before both removes and lower the cap to 25; the intermediate 42 codepoints overflow, while the final 18 fit.",
+      "config": { "memoryCharLimit": 25 },
+      "initial": { "memory": ["stale one", "stale two"], "user": ["Other bank remains untouched"] },
+      "calls": [
+        {
+          "input": { "target": "memory", "operations": [{ "action": "add", "content": "fresh durable fact" }, { "action": "remove", "old_text": "stale one" }, { "action": "remove", "old_text": "stale two" }] },
+          "expected": { "success": true, "writes": 1, "entries": { "memory": ["fresh durable fact"], "user": ["Other bank remains untouched"] }, "chars": { "memory": 18 } }
+        }
+      ]
+    },
+    {
+      "id": "batch-final-failure-preserves-medium",
+      "provenance": [
+        { "kind": "upstream-test", "path": "tests/tools/test_memory_tool.py", "function": "TestBatchRefusesToEmptyNonEmptyStore.test_batch_removing_last_entry_is_refused_and_preserves_disk" }
+      ],
+      "adaptation": "Use the upstream memory parameter row. DSH persists a JSON KV snapshot, so compare that serialized medium and its write count rather than MEMORY.md bytes.",
+      "initial": { "memory": ["fact A", "second entry here"], "user": ["Other bank remains untouched"] },
+      "calls": [
+        {
+          "input": { "target": "memory", "operations": [{ "action": "remove", "old_text": "fact A" }, { "action": "remove", "old_text": "second entry" }] },
+          "expected": { "success": false, "writes": 0, "entries": { "memory": ["fact A", "second entry here"], "user": ["Other bank remains untouched"] } }
+        }
+      ]
+    },
+    {
+      "id": "missing-target-rejected-then-corrected",
+      "provenance": [
+        { "kind": "upstream-test", "path": "tests/tools/test_memory_target_contract.py", "function": "test_missing_target_can_be_corrected_without_writing_to_the_other_store" }
+      ],
+      "adaptation": "Use the user/batch row through DSH's compiled public schema; missing target raises INVALID_ARGS in DSH rather than returning the Hermes error payload.",
+      "initial": { "memory": ["Existing memory fact"], "user": ["Existing user fact"] },
+      "calls": [
+        {
+          "input": { "operations": [{ "action": "add", "content": "User prefers metric units" }] },
+          "expected": { "success": false, "errorCode": "INVALID_ARGS", "writes": 0, "entries": { "memory": ["Existing memory fact"], "user": ["Existing user fact"] } }
+        },
+        {
+          "input": { "target": "user", "operations": [{ "action": "add", "content": "User prefers metric units" }] },
+          "expected": { "success": true, "writes": 1, "entries": { "memory": ["Existing memory fact"], "user": ["Existing user fact", "User prefers metric units"] } }
+        }
+      ]
+    },
+    {
+      "id": "session-snapshot-remains-frozen",
+      "provenance": [
+        { "kind": "upstream-test", "path": "tests/tools/test_memory_tool.py", "function": "TestMemoryStoreSnapshot.test_snapshot_frozen_at_load" }
+      ],
+      "adaptation": "Capture DSH's first admitted session message instead of calling Hermes load_from_disk; check the old session retains it and a fresh session sees committed state.",
+      "initial": { "memory": ["loaded at start"], "user": [] },
+      "snapshot": { "contains": ["loaded at start"], "excludes": ["added later"] },
+      "calls": [
+        {
+          "input": { "target": "memory", "operations": [{ "action": "add", "content": "added later" }] },
+          "expected": { "success": true, "writes": 1, "entries": { "memory": ["loaded at start", "added later"], "user": [] } }
+        }
+      ]
+    }
+  ]
+}
