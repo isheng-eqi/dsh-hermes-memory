@@ -22,6 +22,7 @@
     "host.js",
     "client.js",
     "README.md",
+    "README.en.md",
     "CHANGELOG.md",
     "THIRD_PARTY_NOTICES.md",
     "docs/2026-11-09_compatibility-and-hermes-report.md",
