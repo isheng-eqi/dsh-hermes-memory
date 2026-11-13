@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Put default background-review requests, quota/cost impact, and the opt-out setting before installation in both READMEs. Add reusable outreach wording that matches v2.0.0, correcting earlier emails that said the plugin made no separate LLM requests. Thanks to Simin Yuan and Aleksandar for pointing out the mismatch.
+
 - Archive the obsolete lifecycle design, distinguish static and dynamic message sources, and document resource and runtime-metadata retention limits. Thanks to [Magnus Hedemark (@magnus919)](https://github.com/magnus919) for PRs #8–#10 and #12–#14.
 - Add offline quality scoring, synthetic resource characterization, and pinned-host release CI. Harden the release runner against inherited Node test filters/shards; normalize mirror generation across LF/CRLF checkouts. Require successful review outcomes and complete disposal in resource reports, and count replayed user evidence across all phases.
 - Add ten offline Hermes compatibility scenarios with fixed upstream sources and explicit DSH storage/response differences, following Eric's suggestion. These tests cover a selected reviewed subset and do not detect newer upstream changes.

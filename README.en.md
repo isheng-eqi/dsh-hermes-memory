@@ -4,9 +4,15 @@
 
 An adaptation of [Hermes built-in memory](https://github.com/NousResearch/hermes-agent/tree/c0c4357744d1a6994d332b826aea4c77fcccaf38) for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), with two bounded memory banks, frozen session snapshots, atomic curation, and periodic background review.
 
-**Model usage: the v2 static bundle enables an independent background review by default after a qualifying response at each multiple of 10 genuine user turns. Each review uses the current turn's model unless overridden, with at most 16 model requests and a default time budget of 120 seconds.** These additional background calls consume model quota. A review may save grounded, durable facts or decide that nothing is worth saving; the number of entries need not grow over time. Background changes to existing entries and deletions become pending proposals that the owner can approve or discard in the Memory panel.
+> **Before installing — model usage: the v2.0.0 static bundle enables independent background review by default. Reviews make additional LLM requests and consume model quota; paid models may incur additional charges.**
+>
+> - By default, a review follows a qualifying response at each multiple of 10 genuine user turns and inherits the triggering turn's model. Each review allows at most 16 additional model requests, with a default model-loop time budget of 120 seconds. These are limits and a budget, not fixed request counts or prices.
+> - To disable independent background review, set `backgroundReview.enabled: false` in the plugin configuration; see the nested YAML example in [Configure background review](#configure-background-review). Main-agent curation and injected memory still consume tokens, so disabling review does not eliminate model usage.
+> - Cost depends on the model, conversation length, and actual request count. The bank character budgets do not cap total tokens or cost; see [Resource boundaries](#resource-boundaries-for-extension-authors).
 
-The implementation is based on Hermes commit `c0c4357744d1a6994d332b826aea4c77fcccaf38` (2026-11-11). The primary installation is the **static bundle**. The dynamic sandbox has no native request cancellation controller, so the dynamic deployment provides memory tools, snapshots, and statistics while explicitly reporting background review as `unavailable`. Calling a memory tool in either deployment does not itself issue an additional review model request. The plugin uses DSH storage and lifecycle services; platform differences are documented below.
+A review may save grounded, durable facts or decide that nothing is worth saving; the number of entries need not grow over time. Background changes to existing entries and deletions become pending proposals that the owner can approve or discard in the Memory panel.
+
+The implementation is based on Hermes commit `c0c4357744d1a6994d332b826aea4c77fcccaf38` (2026-11-11). The primary installation is the **static bundle**. The dynamic sandbox has no native request cancellation controller, so the dynamic deployment provides memory tools, snapshots, and statistics while explicitly reporting background review as `unavailable`. The plugin uses DSH storage and lifecycle services; platform differences are documented below.
 
 ## Install and use
 
@@ -72,7 +78,14 @@ When a write fails, the tool returns an error and, where applicable, the current
 
 ## Configure background review
 
-Edit the `hermes-memory` entry through the DSH configuration UI or configuration editing service. Common settings:
+Edit the `hermes-memory` entry through the DSH configuration UI or configuration editing service. To disable independent background review while retaining memory tools and snapshots, merge this configuration into that entry:
+
+```yaml
+backgroundReview:
+  enabled: false
+```
+
+Full default configuration example (`enabled: true` enables background review):
 
 ```yaml
 memoryCharLimit: 2200
