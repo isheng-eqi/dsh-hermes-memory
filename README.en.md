@@ -132,6 +132,18 @@ A separate `~/.dsh/storages/hermes_memory_runtime.json` stores review claims, ou
 
 Static and dynamic installations share the same storage names and must have only one writer instance. The write queue and storage hub serialize writes within one host. Multiple DSH processes writing to the same directory, or external edits to the files while the plugin is running, are unsupported. This follows DSH's current storage contract and differs from Hermes' native file locking.
 
+### Runtime metadata retention
+
+The bank character budgets apply only to the rendered `memory` and `user` entries. They do **not** limit the runtime metadata file, its in-memory copy, or copies made while publishing an update. The current implementation has no automatic expiration, record-count cap, or pruning for runtime metadata:
+
+- **Review records:** the latest claimed turn and its outcome are retained for each distinct session ID. A later review in the same session replaces that session's record, rather than appending every review. Records for other sessions remain, including after reload; their turn markers prevent replay of already claimed triggers.
+- **Proposal records:** each staged proposal retains its operations, pinned entry identities/content, provenance, and status. Approving or discarding a proposal changes its status; it does not delete the record. Completed proposals disappear from the pending list but remain in storage. Interrupted approvals also remain available for inspection.
+- **Reload:** recovery updates unfinished statuses, not retention. Reloading does not compact or reset the runtime file. The plugin loads the runtime global document in full and publishes a new global document when updating it, so metadata growth can increase storage and memory costs even when both banks are below their budgets.
+
+For long-running installations, monitor the runtime file separately from bank usage. There is currently no supported cleanup command. Do not delete or hand-prune review claims or proposal records to reclaim space: doing so can remove replay protection or the evidence needed to resolve an uncertain approval. Before any recovery or future migration, stop the single writer and back up **both** storage files together; retain the originals. Follow a migration procedure that preserves claim and approval semantics, then reload and inspect the stored state before resuming writes. Discarding a proposal in the panel is a workflow decision, not a storage cleanup operation.
+
+Implementation references: [`ensureRuntime`, `claimReview`, and `finishReview`](lib/index.js), and `pendingAction` in the same module. A future bounded-retention policy needs to preserve replay protection and uncertain approval records; this documentation does not introduce automatic deletion.
+
 The panel API uses DSH owner authentication and Host/Origin checks. Responses disable caching:
 
 | Path | Method | Purpose |
