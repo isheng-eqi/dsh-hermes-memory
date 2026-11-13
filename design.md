@@ -1,3 +1,22 @@
+> **历史文档，已归档：本页描述早期动态插件设计，不是当前 v2 的实现契约。请勿直接复制其中的消息来源、工具协议或触发规则。**
+>
+> 当前行为以 [中文 README](README.md)、[English README](README.en.md) 和 [`lib/index.js`](lib/index.js) 为准。下面保留原文，供理解设计演变。
+>
+> **Archived historical document:** this page describes an earlier dynamic-plugin design, not the current v2 contract. Do not copy its message sources, tool protocol, or trigger rules. Use the current READMEs and host integration linked above. The original text is preserved below for historical context.
+
+## 当前实现与本文的主要差异 / Current implementation differences
+
+| 范围 / Area | 当前 v2 契约 / Current v2 contract |
+|---|---|
+| 消息来源 / Message source | 使用 producer-owned `plugin:dsh-hermes-memory`；旧 `{kind: 'plugin'}` 只在历史读取时兼容，不能用于新的 v4 消息。 / New v4 messages use the producer-owned kind; the old kind is recognized only when reading legacy history. |
+| 工具协议 / Tool protocol | `memory` 要求 `target` 和 `operations`，公开操作为 `add`、`patch`、`remove`；不是本文的旧接口。 / The public schema requires `target` and `operations`, with `add`, `patch`, and `remove`. |
+| 触发 / Trigger | 默认每 10 个真实用户回合的合格完成答复后独立复盘；不是“连续 N 轮没有写入”的提醒。 / Independent review follows a qualifying response at each multiple of 10 genuine user turns, not N turns without a write. |
+| 失败 / Failures | 第四次合并失败起返回停止重试提示，不硬性拒绝后续调用。 / Starting at the fourth consolidation failure, guidance asks the model to stop; it is not a hard tool-call limit. |
+| 部署 / Deployment | 静态 bundle 为主；动态沙箱后台复盘不可用，但仍提供记忆工具、快照和统计。 / Static bundle is primary; dynamic deployment retains memory tools, snapshots and statistics but cannot run background review. |
+| 内容检查 / Content guard | 当前已有可配置的本地启发式检查；不等同于完整安全隔离。 / A configurable local heuristic guard exists; it is not a complete security boundary. |
+
+---
+
 # Hermes 式记忆管理插件（DSH 动态 Cordis Plugin）— 设计文档 v4
 
 > v4 = 忠实复刻 hermes-agent `MemoryStore`（MEMORY.md / USER.md 机制）。
