@@ -31,7 +31,9 @@ export function assertCompleteTap(output) {
   const count = key => {
     const matches = [...output.matchAll(new RegExp(`^# ${key} (\\d+)\\r?$`, 'gm'))]
     if (matches.length !== 1) throw new Error(`Missing or ambiguous TAP ${key} summary`)
-    return Number(matches[0][1])
+    const value = Number(matches[0][1])
+    if (!Number.isSafeInteger(value)) throw new Error(`Invalid TAP ${key} summary count`)
+    return value
   }
   const result = Object.fromEntries(['tests', 'pass', 'fail', 'cancelled', 'skipped', 'todo'].map(key => [key, count(key)]))
   if (result.tests === 0 || result.pass !== result.tests || result.fail || result.cancelled || result.skipped || result.todo) {
@@ -39,15 +41,24 @@ export function assertCompleteTap(output) {
   }
   return result
 }
+export function runTestSuite(files, env = process.env) {
+  const childEnv = { ...env }
+  // Inherited filters/shards can omit tests without reporting skips. A nested
+  // node:test context can suppress the new runner altogether.
+  for (const key of Object.keys(childEnv)) {
+    if (['NODE_OPTIONS', 'NODE_TEST_CONTEXT'].includes(key.toUpperCase())) delete childEnv[key]
+  }
+  return spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...files], {
+    cwd: root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024,
+    env: childEnv,
+  })
+}
 export function main() {
   const checkout = validateCheckout(process.env.DSH_CLIENT_TEST_CHECKOUT)
   console.log(`Host baseline: ${baseline.repository}@${baseline.revision}; Node ${process.version}`)
   execFileSync(process.execPath, ['scripts/build-host.mjs', '--check'], { cwd: root, stdio: 'inherit' })
   const files = readdirSync(join(root, 'tests')).filter(name => name.endsWith('.test.mjs')).sort().map(name => join('tests', name))
-  const result = spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...files], {
-    cwd: root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024,
-    env: { ...process.env, DSH_CLIENT_TEST_CHECKOUT: checkout },
-  })
+  const result = runTestSuite(files, { ...process.env, DSH_CLIENT_TEST_CHECKOUT: checkout })
   process.stdout.write(result.stdout || '')
   process.stderr.write(result.stderr || '')
   if (result.error) throw result.error
