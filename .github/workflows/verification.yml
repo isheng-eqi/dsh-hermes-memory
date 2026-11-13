@@ -38,7 +38,8 @@ jobs:
       - run: npm ci --ignore-scripts
       - name: Read pinned host revision
         run: |
-          echo "HOST_REVISION=$(node -p \"require('./scripts/testing/host-baseline.json').revision\")" >> "$GITHUB_ENV"
+          revision=$(node -p "require('./scripts/testing/host-baseline.json').revision")
+          printf 'HOST_REVISION=%s\n' "$revision" >> "$GITHUB_ENV"
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: deepseek-ai/deepseek-harness
