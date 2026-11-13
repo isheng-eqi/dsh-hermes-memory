@@ -8,7 +8,7 @@
 
 | 范围 / Area | 当前 v2 契约 / Current v2 contract |
 |---|---|
-| 消息来源 / Message source | 使用 producer-owned `plugin:dsh-hermes-memory`；旧 `{kind: 'plugin'}` 只在历史读取时兼容，不能用于新的 v4 消息。 / New v4 messages use the producer-owned kind; the old kind is recognized only when reading legacy history. |
+| 消息来源 / Message source | 静态 bundle 使用 producer-owned `plugin:dsh-hermes-memory`，动态入口使用 `plugin:hermes-memory`；旧 `{kind: 'plugin'}` 只在历史读取时兼容，不能用于新的 v4 消息。 / New v4 messages use producer-owned `plugin:dsh-hermes-memory` in the static bundle and `plugin:hermes-memory` in the dynamic entry; the old kind is recognized only when reading legacy history. |
 | 工具协议 / Tool protocol | `memory` 要求 `target` 和 `operations`，公开操作为 `add`、`patch`、`remove`；不是本文的旧接口。 / The public schema requires `target` and `operations`, with `add`, `patch`, and `remove`. |
 | 触发 / Trigger | 默认每 10 个真实用户回合的合格完成答复后独立复盘；不是“连续 N 轮没有写入”的提醒。 / Independent review follows a qualifying response at each multiple of 10 genuine user turns, not N turns without a write. |
 | 失败 / Failures | 第四次合并失败起返回停止重试提示，不硬性拒绝后续调用。 / Starting at the fourth consolidation failure, guidance asks the model to stop; it is not a hard tool-call limit. |
