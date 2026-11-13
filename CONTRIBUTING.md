@@ -1,16 +1,16 @@
 # 贡献指南
 
-感谢你帮助改进 dsh-hermes-memory。本文提供可复现、易审查的贡献路径；不是对合并、发布时间或响应时间的承诺。项目主文档使用简体中文，并提供 [English README](README.en.md)。欢迎提供中文说明及英文翻译；现有英文问题和 PR 也已获得维护者回应。
+感谢你帮助改进 dsh-hermes-memory。本文介绍可复现、易审查的贡献流程。项目主文档使用简体中文，并提供 [English README](README.en.md)。欢迎提供中文说明及英文翻译。
 
 ## 从已有实践出发
 
-以下依据是公开记录，不是从少量样本推导出的强制流程：
+以下贡献展示了有效的问题报告与修复方式：
 
 - [问题 #1](https://github.com/isheng-eqi/dsh-hermes-memory/issues/1)：具体环境、根因、最小补丁及验证结果帮助修复宿主依赖实例冲突。
 - [问题 #2](https://github.com/isheng-eqi/dsh-hermes-memory/issues/2)：维护者分别说明当前集成的修复、静态/动态路径验证，以及未覆盖的历史版本和诊断建议。
 - [PR #3](https://github.com/isheng-eqi/dsh-hermes-memory/pull/3) 和 [PR #4](https://github.com/isheng-eqi/dsh-hermes-memory/pull/4)：精确的过期行示例、回归测试和聚焦修复先行合并；面板与文档后续改进独立提交。维护者明确保留原贡献者的提交、署名和变更日志致谢。
 
-因此，请优先提供可验证的行为、聚焦差异、回归测试和明确的验证范围。大的行为或存储格式变更，建议先在 issue 中讨论方案，避免无谓投入；这不是所有 PR 必须先开 issue 的要求。
+因此，请优先提供可验证的行为、聚焦差异、回归测试和明确的验证范围。大的行为或存储格式变更，建议先在 issue 中讨论方案。
 
 ## 本地开发与验证
 
@@ -45,29 +45,25 @@ DSH_CLIENT_TEST_CHECKOUT=/absolute/path/to/built/dsh npm test
 
 问题报告请包含：插件和宿主版本、操作系统、最小复现、预期/实际结果、脱敏错误信息，以及已验证与尚未验证的范围。能提供失败回归测试更好。
 
-PR 请说明问题及理由、关联 issue（如有）、变更范围、测试命令和结果，以及兼容性/迁移/模型调用方面的影响。尽量一项独立问题一个 PR，避免混入重构。现有提交常用 `fix:` / `fix(memory):` 等简洁前缀，可沿用，但这不是强制提交检查。修复的 source 已合并不等于 npm 已发布。
+PR 请说明问题及理由、关联 issue（如有）、变更范围、测试命令和结果，以及兼容性/迁移/模型调用方面的影响。尽量一项独立问题一个 PR，避免混入重构。提交标题可沿用 `fix:` / `fix(memory):` 等简洁前缀。修复的 source 已合并不等于 npm 已发布。
 
-保留他人的署名和贡献来源。若使用 AI 协助，请说明协助方式与负责审查的人，认真复核补丁和测试，不让生成内容替代证据。例如：
-
-> 本贡献在 Magnus Hedemark 的指导下，由 Codex 协助完成。
-
-这是一项透明度建议，不代表项目此前已有强制 AI 政策。不要声称维护者已批准尚未审阅的规则或变更。代理另请阅读 [AGENTS.md](AGENTS.md)。
+保留他人的署名和贡献来源。若使用 AI 协助，在 PR 描述中说明协助方式与负责审查的人，并复核补丁和测试。代理另请阅读 [AGENTS.md](AGENTS.md)。
 
 ---
 
 # Contributing
 
-Thank you for helping improve dsh-hermes-memory. This guide offers a reproducible, reviewable contribution path, not a promise of merging, releases or response times. The primary documentation uses Simplified Chinese and provides an [English README](README.en.md). Chinese explanations with English translations are welcome; existing English issues and PRs have also received maintainer responses.
+Thank you for helping improve dsh-hermes-memory. This guide describes a reproducible, reviewable contribution workflow. The primary documentation uses Simplified Chinese and provides an [English README](README.en.md). Chinese explanations with English translations are welcome.
 
 ## Grounded in existing practice
 
-These are public observations, not mandatory process inferred from a small sample:
+These contributions demonstrate effective reports and fixes:
 
 - [Issue #1](https://github.com/isheng-eqi/dsh-hermes-memory/issues/1): a concrete environment, root cause, minimal patch and verification helped resolve conflicting host dependency instances.
 - [Issue #2](https://github.com/isheng-eqi/dsh-hermes-memory/issues/2): the maintainer distinguished the current integration fix, static/dynamic verification, and historical versions and diagnostic suggestions not covered.
 - [PR #3](https://github.com/isheng-eqi/dsh-hermes-memory/pull/3) and [PR #4](https://github.com/isheng-eqi/dsh-hermes-memory/pull/4): a precise stale-row example, regression tests and focused fix were merged first; panel and documentation follow-ups were separate. The maintainer explicitly preserved the contributor's commit, authorship and changelog credit.
 
-Prioritize verifiable behavior, focused diffs, regression tests and explicit verification scope. For large behavior or storage-format changes, discussing the proposal in an issue first can avoid wasted effort; this is not a requirement to open an issue before every PR.
+Prioritize verifiable behavior, focused diffs, regression tests and explicit verification scope. For large behavior or storage-format changes, consider discussing the proposal in an issue first.
 
 ## Local development and verification
 
@@ -102,10 +98,6 @@ Report passed, failed and skipped counts and Node/DSH versions or commits. If th
 
 Include plugin and host versions, OS, minimal reproduction, expected/actual behavior, sanitized errors, and what is and is not verified. A failing regression test is useful.
 
-Explain the problem and rationale, linked issue if any, scope, test commands/results, and compatibility, migration or model-call implications. Prefer one independent problem per PR without unrelated refactoring. Existing commits often use concise prefixes such as `fix:` / `fix(memory):`; these are useful examples, not an enforced commit check. Merged source does not mean an npm release has shipped.
+Explain the problem and rationale, linked issue if any, scope, test commands/results, and compatibility, migration or model-call implications. Prefer one independent problem per PR without unrelated refactoring. Commit titles can follow concise examples such as `fix:` / `fix(memory):`. Merged source does not mean an npm release has shipped.
 
-Preserve others' authorship and contribution provenance. If AI assisted, explain its role and the human responsible for review, and verify the patch and tests rather than substituting generated text for evidence. For example:
-
-> This contribution was made with Codex assistance under Magnus Hedemark’s direction.
-
-This is a transparency recommendation, not a claim that the project previously had a mandatory AI policy. Do not claim maintainer approval of unreviewed rules or changes. Agents should also read [AGENTS.md](AGENTS.md).
+Preserve others' authorship and contribution provenance. If AI assisted, describe its role and the human responsible for review in the PR description, and verify the patch and tests. Agents should also read [AGENTS.md](AGENTS.md).
