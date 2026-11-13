@@ -1,0 +1,61 @@
+name: Verification
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        node: ['22.19.0', '24.21.0']
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm test
+  pinned-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.21.0'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Read pinned host revision
+        run: |
+          revision=$(node -p "require('./scripts/testing/host-baseline.json').revision")
+          printf 'HOST_REVISION=%s\n' "$revision" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: ${{ env.HOST_REVISION }}
+          path: .host-checkout
+          persist-credentials: false
+      - run: npm install --global pnpm@11.28.5
+      - name: Build pinned host (no services or model credentials)
+        working-directory: .host-checkout
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          node --import tsx scripts/compile-referenced-projects.ts host-libraries
+          pnpm exec tsc -b tsconfig.client.json
+          pnpm exec tsdown --config-loader native --env.DSH_BUILD_FACE client
+          node --import tsx native/system/scripts/build.ts --host-addon-only
+      - name: Require complete integration results
+        env:
+          DSH_CLIENT_TEST_CHECKOUT: ${{ github.workspace }}/.host-checkout
+        run: node scripts/testing/host-release-check.mjs

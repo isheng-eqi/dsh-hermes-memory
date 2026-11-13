@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Archive the obsolete lifecycle design, distinguish static and dynamic message sources, and document resource and runtime-metadata retention limits. Thanks to [Magnus Hedemark (@magnus919)](https://github.com/magnus919) for PRs #8–#10 and #12–#14.
+- Add offline quality scoring, synthetic resource characterization, and pinned-host release CI. Harden the release runner against inherited Node test filters/shards; normalize mirror generation across LF/CRLF checkouts. Require successful review outcomes and complete disposal in resource reports, and count replayed user evidence across all phases.
+- Add ten offline Hermes compatibility scenarios with fixed upstream sources and explicit DSH storage/response differences, following Eric's suggestion. These tests cover a selected reviewed subset and do not detect newer upstream changes.
+
 - Require an exact full-entry match for panel edits and deletes, so stale rows cannot modify another entry through substring matching. Thanks to [Teo (@teo-nex)](https://github.com/teo-nex) for [PR #3](https://github.com/isheng-eqi/dsh-hermes-memory/pull/3) and four static/dynamic regression cases.
 - Keep the active edit draft until save or cancel, including after list reordering or removal of its original entry. Show save errors next to the editor and require an inline full-text confirmation before deletion.
 - Add five panel regression tests covering draft protection, save retry errors, refreshed or missing entries, and delete confirmation/failure behavior.

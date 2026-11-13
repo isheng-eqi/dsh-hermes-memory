@@ -104,6 +104,20 @@ When a different provider or model is selected, the previous model's reasoning e
 
 A background error does not fail normal chat. Failure status remains visible. The same claimed trigger is not automatically replayed after reload; a later interval can try again. A successful earlier write is not rolled back if a later review request fails.
 
+### Resource boundaries for extension authors
+
+“Bounded memory” describes the two curated banks, not a bound on total process memory, disk usage, tokens, or cost. Keep these separate when integrating the plugin:
+
+| Resource | Plugin boundary | Outside that boundary |
+| --- | --- | --- |
+| Curated bank content | Default `memoryCharLimit: 2200` and `userCharLimit: 1375`, measured in Unicode code points including entry separators; final batches are validated before commit | Prompt framing, tool schemas, conversation evidence, and runtime metadata are not charged to these budgets. Lowering a limit does not automatically truncate existing data; removal-only repairs remain possible |
+| Review input | The scheduler captures text from all derived user, assistant, and tool messages available at the trigger; it does not impose an input-size cap or truncate that evidence | `runReview` has an optional reject-only `maxInputChars` argument, but the automatic scheduler does **not** supply it and it is not a deployment configuration field. It measures serialized input with JavaScript string length (UTF-16 code units), not the banks' Unicode code-point count |
+| Concurrent reviews | At most one active review per session; overlapping triggers for that session are skipped | No plugin-wide concurrency cap across different sessions. The serialized write queue does not serialize model requests |
+| Requests and time | At most 16 model requests per review, configurable downward; a default 120-second model-loop cancellation budget | Not a tool-call, token, cost, or hard end-to-end shutdown limit. Already-started writes are awaited; host/adapter network retries have their own controls |
+| Model context and output | Uses the selected model's effective request configuration | Context-window admission, output-token limits, and provider quotas belong to the host/model adapter/provider; they are not guaranteed by bank budgets or the request-count limit |
+
+For integrations needing a strict resource envelope, define input admission, aggregate concurrency, and token/cost policies at the appropriate host boundary rather than assuming the bank budgets provide them. See [`lib/scheduler.js`](lib/scheduler.js), [`lib/review.js`](lib/review.js), and [`lib/core.js`](lib/core.js) for the respective contracts. No additional caps or automatic truncation are enabled by this documentation.
+
 ## Storage and recovery
 
 DSH's JSON KvUnit stores memory in `~/.dsh/storages/hermes_memory.json`. The first mutation of v1 records writes an atomic v2 global snapshot:
@@ -117,6 +131,18 @@ The original v1 tables remain as a recovery copy; subsequent reads use the v2 sn
 A separate `~/.dsh/storages/hermes_memory_runtime.json` stores review claims, outcomes, and pending proposals without adding that metadata to the main session. On reload, unfinished reviews are marked interrupted. An approval with an uncertain commit outcome is not automatically replayed. Any durable publication error stops further writes; reload the plugin and reread storage before deciding how to recover.
 
 Static and dynamic installations share the same storage names and must have only one writer instance. The write queue and storage hub serialize writes within one host. Multiple DSH processes writing to the same directory, or external edits to the files while the plugin is running, are unsupported. This follows DSH's current storage contract and differs from Hermes' native file locking.
+
+### Runtime metadata retention
+
+The bank character budgets apply only to the rendered `memory` and `user` entries. They do **not** limit the runtime metadata file, its in-memory copy, or copies made while publishing an update. The current implementation has no automatic expiration, record-count cap, or pruning for runtime metadata:
+
+- **Review records:** the latest claimed turn and its outcome are retained for each distinct session ID. A later review in the same session replaces that session's record, rather than appending every review. Records for other sessions remain, including after reload; their turn markers prevent replay of already claimed triggers.
+- **Proposal records:** each staged proposal retains its operations, pinned entry identities/content, provenance, and status. Approving or discarding a proposal changes its status; it does not delete the record. Completed proposals disappear from the pending list but remain in storage. Interrupted approvals also remain available for inspection.
+- **Reload:** recovery updates unfinished statuses, not retention. Reloading does not compact or reset the runtime file. The plugin loads the runtime global document in full and publishes a new global document when updating it, so metadata growth can increase storage and memory costs even when both banks are below their budgets.
+
+For long-running installations, monitor the runtime file separately from bank usage. There is currently no supported cleanup command. Do not delete or hand-prune review claims or proposal records to reclaim space: doing so can remove replay protection or the evidence needed to resolve an uncertain approval. Before any recovery or future migration, stop the single writer and back up **both** storage files together; retain the originals. Follow a migration procedure that preserves claim and approval semantics, then reload and inspect the stored state before resuming writes. Discarding a proposal in the panel is a workflow decision, not a storage cleanup operation.
+
+Implementation references: [`ensureRuntime`, `claimReview`, and `finishReview`](lib/index.js), and `pendingAction` in the same module. A future bounded-retention policy needs to preserve replay protection and uncertain approval records; this documentation does not introduce automatic deletion.
 
 The panel API uses DSH owner authentication and Host/Origin checks. Responses disable caching:
 
@@ -164,6 +190,14 @@ node --test tests/*.test.mjs
 ```
 
 The tests use temporary directories and synthetic data. They cover real v4 encoding, closing and reopening plain JSONL and Zstandard sessions, real JSON KvUnits, native and dynamic VM integration, model adapters, review triggers, concurrency, approvals, and storage failures. Synthetic facts are not written into the actual user memory banks.
+
+Before release, use the [strict pinned-host check](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/docs/host-release-verification.md), which requires the specified revision, clean sources, rebuilt artifacts, and every test passing with zero skips. Ordinary `npm test` success does not replace this evidence. The generator accepts LF and Windows CRLF checkouts while still rejecting stale dynamic mirrors.
+
+Run these development tools from a source checkout of this repository; they are not included in the installed plugin package:
+
+- [Pinned offline Hermes cases](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/docs/upstream-compatibility.md): ten traceable scenarios compare selected behaviors. DSH JSON and Hermes Markdown remain different disk formats, and offline tests do not monitor newer upstream changes.
+- [Synthetic memory quality scorer](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/eval/memory-quality/README.md): scores existing outputs; scorer regression success does not establish model quality.
+- [Synthetic resource characterization](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/docs/resource-characterization.md): observes scheduler, review, storage calls and disposal. Its two-million UTF-16-unit cap covers cumulative user evidence across phases, not complete requests or production resource limits.
 
 The main-chat guidance contains 964 Unicode code points. The memory tool description and parameters add approximately 51 characters compared with the previous version. The background-specific review prompt contains 1477 code points and is sent only in review requests. These are character counts; actual token usage and cost depend on the model tokenizer, conversation length, and request count.
 
