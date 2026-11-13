@@ -4,6 +4,7 @@ import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { evaluate } from '../scripts/evaluate-memory-quality.mjs'
 
 const corpus = JSON.parse(await readFile(new URL('../eval/memory-quality/corpus.v1.json', import.meta.url)))
@@ -64,7 +65,7 @@ test('CLI distinguishes passing, failed and invalid evaluations offline', async 
   t.after(() => rm(directory, {recursive: true, force: true}))
   const file = join(directory, 'results.json')
   const script = new URL('../scripts/evaluate-memory-quality.mjs', import.meta.url)
-  const run = () => spawnSync(process.execPath, [script.pathname, file], {encoding: 'utf8', env: {}})
+  const run = () => spawnSync(process.execPath, [fileURLToPath(script), file], {encoding: 'utf8', env: {}})
   await writeFile(file, JSON.stringify(perfect()))
   const good = run()
   assert.equal(good.status, 0, good.stderr)
