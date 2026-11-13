@@ -133,6 +133,11 @@ function section(tree, bank = 'memory') {
   assert.ok(node, `section ${bank} exists`)
   return node.props
 }
+function sectionView(tree, bank = 'memory') {
+  const node = walk(tree, (node) => typeof node.type === 'function' && node.props.bank === bank)[0]
+  assert.ok(node, `section ${bank} exists`)
+  return node.type(node.props)
+}
 
 // Synthetic payloads only: tests never connect to a real service or expose memory contents.
 test('static: slots dependency and owned stylesheet cleanup', () => {
@@ -227,6 +232,121 @@ test('static: failed add/edit retain the draft and editor; successful retry clea
   section(h.render()).onAdd()
   await tick()
   assert.equal(section(h.render()).draft, '')
+})
+
+test('static: another row or bank cannot replace an active draft before save or cancel', async () => {
+  const h = fixture(async () => response({ ...list(['first entry', 'second entry']), user: ['user entry'] }))
+  h.show()
+  await tick()
+  const before = section(h.render())
+  before.onEdit({ bank: 'memory', index: 0, text: 'unsaved draft', original: 'first entry' })
+  // Even a click handler retained from the previous render cannot switch rows.
+  before.onEdit({ bank: 'memory', index: 1, text: 'second entry', original: 'second entry' })
+  section(h.render(), 'user').onEdit({ bank: 'user', index: 0, text: 'user entry', original: 'user entry' })
+  assert.equal(section(h.render()).editing.text, 'unsaved draft')
+  for (const bank of ['memory', 'user']) {
+    const view = sectionView(h.render(), bank)
+    for (const action of walk(view, (node) => node.type === 'button' && ['编辑', '删除'].includes(text(node)))) {
+      assert.equal(action.props.disabled, true)
+    }
+  }
+  const view = sectionView(h.render())
+  walk(view, (node) => node.type === 'textarea')[0].props.onChange({ target: { value: 'updated draft' } })
+  assert.equal(section(h.render()).editing.text, 'updated draft')
+  section(h.render()).onCancel()
+  section(h.render()).onEdit({ bank: 'memory', index: 1, text: 'second entry', original: 'second entry' })
+  assert.equal(section(h.render()).editing.original, 'second entry')
+})
+
+test('static: failed saves show beside the editor and only Save retries the mutation', async () => {
+  let succeeds = false
+  const h = fixture(async (_path, init) => JSON.parse(init.body).action === 'list'
+    ? response(list()) : response(succeeds ? { success: true } : { error: 'synthetic save failure' }, succeeds ? 200 : 422))
+  h.show()
+  await tick()
+  section(h.render()).onEdit({ bank: 'memory', index: 0, original: 'synthetic entry', text: 'changed draft' })
+  section(h.render()).onSave()
+  await tick()
+  let tree = h.render()
+  assert.match(text(sectionView(tree)), /保存失败：synthetic save failure/)
+  assert.doesNotMatch(text(tree), /synthetic save failure|重试载入/)
+  button(tree, '刷新').props.onClick()
+  await tick()
+  tree = h.render()
+  assert.equal(section(tree).editing.text, 'changed draft')
+  assert.match(text(sectionView(tree)), /synthetic save failure/)
+  assert.equal(h.calls.filter(([, init]) => JSON.parse(init.body).action === 'replace').length, 1)
+  succeeds = true
+  section(tree).onSave()
+  await tick()
+  assert.equal(section(h.render()).editing, null)
+  assert.equal(h.calls.filter(([, init]) => JSON.parse(init.body).action === 'replace').length, 2)
+})
+
+test('static: refresh keeps the editor on its original entry and preserves missing-entry drafts', async () => {
+  let entries = ['first entry', 'second entry']
+  const h = fixture(async () => response(list(entries)))
+  h.show()
+  await tick()
+  section(h.render()).onEdit({ bank: 'memory', index: 0, original: 'first entry', text: 'retained draft' })
+  entries = ['second entry', 'first entry']
+  button(h.render(), '刷新').props.onClick()
+  await tick()
+  let rows = walk(sectionView(h.render()), (node) => node.props.className === 'hm-row')
+  assert.equal(walk(rows[0], (node) => node.type === 'textarea').length, 0)
+  assert.equal(walk(rows[1], (node) => node.type === 'textarea')[0].props.value, 'retained draft')
+  entries = ['second entry']
+  button(h.render(), '刷新').props.onClick()
+  await tick()
+  let view = sectionView(h.render())
+  assert.match(text(view), /原条目已变化或被删除/)
+  assert.equal(walk(view, (node) => node.type === 'textarea')[0].props.value, 'retained draft')
+  h.close()
+  h.reopen()
+  await tick()
+  assert.equal(section(h.render()).editing.text, 'retained draft')
+})
+
+test('static: deletion requires inline confirmation of the full original text', async () => {
+  const write = deferred()
+  const h = fixture(async (_path, init) => JSON.parse(init.body).action === 'list' ? response(list()) : write.promise)
+  h.show()
+  await tick()
+  section(h.render()).onRemove('memory', 'synthetic entry')
+  assert.equal(h.calls.length, 1)
+  let view = sectionView(h.render())
+  assert.match(text(view), /确认删除以下记忆？ synthetic entry/)
+  button(view, '取消删除').props.onClick()
+  assert.equal(section(h.render()).deleting, null)
+  assert.equal(h.calls.length, 1)
+  section(h.render()).onRemove('memory', 'synthetic entry')
+  const confirm = button(sectionView(h.render()), '确认删除').props.onClick
+  confirm(); confirm()
+  assert.equal(h.calls.length, 2)
+  assert.deepEqual(JSON.parse(h.calls[1][1].body), { action: 'remove', bank: 'memory', oldText: 'synthetic entry' })
+  assert.equal(button(sectionView(h.render()), '取消删除').props.disabled, true)
+  write.resolve(response({ success: true }))
+  await tick()
+  assert.equal(section(h.render()).deleting, null)
+})
+
+test('static: a stale delete keeps its confirmation and error without changing the target', async () => {
+  const h = fixture(async (_path, init) => JSON.parse(init.body).action === 'list'
+    ? response(list()) : response({ error: 'entry changed; refresh the list' }, 422))
+  h.show()
+  await tick()
+  section(h.render()).onRemove('memory', 'synthetic entry')
+  section(h.render()).onConfirmRemove()
+  await tick()
+  let view = sectionView(h.render())
+  assert.match(text(view), /删除失败：entry changed; refresh the list/)
+  assert.equal(section(h.render()).deleting.text, 'synthetic entry')
+  assert.doesNotMatch(text(h.render()), /重试载入/)
+  button(h.render(), '刷新').props.onClick()
+  await tick()
+  assert.equal(h.calls.filter(([, init]) => JSON.parse(init.body).action === 'remove').length, 1)
+  button(sectionView(h.render()), '取消删除').props.onClick()
+  assert.equal(section(h.render()).deleting, null)
 })
 
 test('static: a retained Enter/click handler cannot duplicate an in-flight mutation', async () => {

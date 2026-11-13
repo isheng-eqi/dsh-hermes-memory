@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Require an exact full-entry match for panel edits and deletes, so stale rows cannot modify another entry through substring matching. Thanks to [Teo (@teo-nex)](https://github.com/teo-nex) for [PR #3](https://github.com/isheng-eqi/dsh-hermes-memory/pull/3) and four static/dynamic regression cases.
+- Keep the active edit draft until save or cancel, including after list reordering or removal of its original entry. Show save errors next to the editor and require an inline full-text confirmation before deletion.
+- Add five panel regression tests covering draft protection, save retry errors, refreshed or missing entries, and delete confirmation/failure behavior.
+- Add a complete English README and reciprocal language links, include it in the published package, and clarify the additional background model requests and default limits in both introductions.
+
 ## 2.0.0 — 2026-11-11
 
 Built-in memory behavior is pinned to Hermes `c0c4357744d1a6994d332b826aea4c77fcccaf38` and adapted to current DSH v4 session persistence.
