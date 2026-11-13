@@ -104,6 +104,20 @@ When a different provider or model is selected, the previous model's reasoning e
 
 A background error does not fail normal chat. Failure status remains visible. The same claimed trigger is not automatically replayed after reload; a later interval can try again. A successful earlier write is not rolled back if a later review request fails.
 
+### Resource boundaries for extension authors
+
+“Bounded memory” describes the two curated banks, not a bound on total process memory, disk usage, tokens, or cost. Keep these separate when integrating the plugin:
+
+| Resource | Plugin boundary | Outside that boundary |
+| --- | --- | --- |
+| Curated bank content | Default `memoryCharLimit: 2200` and `userCharLimit: 1375`, measured in Unicode code points including entry separators; final batches are validated before commit | Prompt framing, tool schemas, conversation evidence, and runtime metadata are not charged to these budgets. Lowering a limit does not automatically truncate existing data; removal-only repairs remain possible |
+| Review input | The scheduler captures text from all derived user, assistant, and tool messages available at the trigger; it does not impose an input-size cap or truncate that evidence | `runReview` has an optional reject-only `maxInputChars` argument, but the automatic scheduler does **not** supply it and it is not a deployment configuration field. It measures serialized input with JavaScript string length (UTF-16 code units), not the banks' Unicode code-point count |
+| Concurrent reviews | At most one active review per session; overlapping triggers for that session are skipped | No plugin-wide concurrency cap across different sessions. The serialized write queue does not serialize model requests |
+| Requests and time | At most 16 model requests per review, configurable downward; a default 120-second model-loop cancellation budget | Not a tool-call, token, cost, or hard end-to-end shutdown limit. Already-started writes are awaited; host/adapter network retries have their own controls |
+| Model context and output | Uses the selected model's effective request configuration | Context-window admission, output-token limits, and provider quotas belong to the host/model adapter/provider; they are not guaranteed by bank budgets or the request-count limit |
+
+For integrations needing a strict resource envelope, define input admission, aggregate concurrency, and token/cost policies at the appropriate host boundary rather than assuming the bank budgets provide them. See [`lib/scheduler.js`](lib/scheduler.js), [`lib/review.js`](lib/review.js), and [`lib/core.js`](lib/core.js) for the respective contracts. No additional caps or automatic truncation are enabled by this documentation.
+
 ## Storage and recovery
 
 DSH's JSON KvUnit stores memory in `~/.dsh/storages/hermes_memory.json`. The first mutation of v1 records writes an atomic v2 global snapshot:
