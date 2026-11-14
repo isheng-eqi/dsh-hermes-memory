@@ -133,29 +133,31 @@ For integrations needing a strict resource envelope, define input admission, agg
 
 ## Storage and recovery
 
-DSH's JSON KvUnit stores memory in `~/.dsh/storages/hermes_memory.json`. The first mutation of v1 records writes an atomic v2 global snapshot:
+By default, the plugin uses DSH's JSON KvUnit at `~/.dsh/storages/hermes_memory.json`. The first mutation of v1 records writes an atomic v2 global snapshot:
 
 ```text
-global: { format: 2, tables: { memory, user } }
+global: { format: 2, tables: { memory, user }, seqHighWater: { memory, user } }
 ```
 
-The original v1 tables remain as a recovery copy; subsequent reads use the v2 snapshot. Back up data before downgrading. Older versions cannot read later updates stored in v2.
+The original v1 tables remain as an upgrade recovery copy; subsequent reads use the v2 snapshot. Sequence high-water marks survive deletion and reload so an old proposal cannot acquire a new entry's identity. Existing v2 snapshots without those marks are accepted; retained proposal pins also reserve their sequence identities.
 
-A separate `~/.dsh/storages/hermes_memory_runtime.json` stores review claims, outcomes, and pending proposals without adding that metadata to the main session. On reload, unfinished reviews are marked interrupted. An approval with an uncertain commit outcome is not automatically replayed. Any durable publication error stops further writes; reload the plugin and reread storage before deciding how to recover.
+A separate `hermes_memory_runtime.json` stores review claims, outcomes, and pending proposals. Runtime access and recovery require ownership of the main unit, so a second plugin instance cannot take only the metadata unit. On reload, unfinished work is marked interrupted. An approval with an uncertain outcome is not automatically replayed. Any publication error stops further writes until reload and inspection.
 
-Static and dynamic installations share the same storage names and must have only one writer instance. The write queue and storage hub serialize writes within one host. Multiple DSH processes writing to the same directory, or external edits to the files while the plugin is running, are unsupported. This follows DSH's current storage contract and differs from Hermes' native file locking.
+### Select storage protection
 
-### Runtime metadata retention
+The default host JSON mode serializes one plugin's writes and rejects duplicate handles in the same backend instance. It does **not** enforce a cross-process lock or detect external edits. The pinned DSH JSON backend attempts rename once and has no Windows transient-error retry. The plugin does not retry a whole KvUnit operation because rejection can occur after publication.
 
-The bank character budgets apply only to the rendered `memory` and `user` entries. They do **not** limit the runtime metadata file, its in-memory copy, or copies made while publishing an update. The current implementation has no automatic expiration, record-count cap, or pruning for runtime metadata:
+Native static installations can opt into a plugin-owned, DSH-format-compatible backend by setting **`storageRoot` to the absolute storage directory**. It acquires one sidecar lease for both files, rejects a second cooperating writer, checks both file fingerprints before publication, and retries only Windows `EPERM` / `EBUSY` / `EACCES` rename failures with bounded backoff. It never deletes the destination to make replacement succeed. See [Storage protection and maintenance](docs/storage-safety.md) for setup, limits, and stale-lock recovery.
 
-- **Review records:** the latest claimed turn and its outcome are retained for each distinct session ID. A later review in the same session replaces that session's record, rather than appending every review. Records for other sessions remain, including after reload; their turn markers prevent replay of already claimed triggers.
-- **Proposal records:** each staged proposal retains its operations, pinned entry identities/content, provenance, and status. Approving or discarding a proposal changes its status; it does not delete the record. Completed proposals disappear from the pending list but remain in storage. Interrupted approvals also remain available for inspection.
-- **Reload:** recovery updates unfinished statuses, not retention. Reloading does not compact or reset the runtime file. The plugin loads the runtime global document in full and publishes a new global document when updating it, so metadata growth can increase storage and memory costs even when both banks are below their budgets.
+Stop every existing writer and back up both files before switching. `storageRoot` selects the plugin-owned directory directly; it is not inferred from private host settings. Do not mix this backend with a host-JSON or older writer on the same files: those writers do not honor its lease. Dynamic sandbox deployments retain host-JSON behavior and cannot enable native protection. Diagnostics report the selected mode; protection is not silently assumed.
 
-For long-running installations, monitor the runtime file separately from bank usage. There is currently no supported cleanup command. Do not delete or hand-prune review claims or proposal records to reclaim space: doing so can remove replay protection or the evidence needed to resolve an uncertain approval. Before any recovery or future migration, stop the single writer and back up **both** storage files together; retain the originals. Follow a migration procedure that preserves claim and approval semantics, then reload and inspect the stored state before resuming writes. Discarding a proposal in the panel is a workflow decision, not a storage cleanup operation.
+### Compact history and export a downgrade copy
 
-Implementation references: [`ensureRuntime`, `claimReview`, and `finishReview`](lib/index.js), and `pendingAction` in the same module. A future bounded-retention policy needs to preserve replay protection and uncertain approval records; this documentation does not introduce automatic deletion.
+The Memory panel provides **Export backup** and **Compact history details**. Export separates current bank entries, complete storage bookkeeping, and a derived v1 JSON document containing the current entries. It includes disabled banks for the authenticated owner and never installs a downgrade. The [offline maintenance command](docs/storage-safety.md#offline-maintenance-and-downgrade) can also export, compact after making a new backup, or extract the v1 document.
+
+Compaction drops old resolved proposal/review payloads while preserving identities, SHA-256 audit hashes, statuses, and per-session claimed-turn high-water marks. Pending, applying, and interrupted approvals retain their full evidence. The panel uses a 30-day cutoff and keeps the newest 100 detailed resolved rows in each collection. Newer rows and unresolved records are also retained. API/CLI callers can select the cutoff and detailed-history allowance.
+
+This bounds retained **eligible old details**, not the number of distinct replay markers or total bytes. No claims are expired or removed, and there is no automatic cleanup. Monitor the runtime file separately from bank budgets; it is still loaded and rewritten as a whole. Do not hand-trim markers or uncertain approvals. Before recovery or downgrade, stop all writers and retain both original files together. v1 cannot read later updates directly from a v2 file: use the exported v1 document in a separate directory, without v2 runtime metadata, and keep your backup.
 
 The panel API uses DSH owner authentication and Host/Origin checks. Responses disable caching:
 
@@ -164,6 +166,8 @@ The panel API uses DSH owner authentication and Host/Origin checks. Responses di
 | `/hermes-memory/stats` | GET | Readiness, capacity, and background status |
 | `/hermes-memory/ops` | POST | Read both banks or perform direct edits; list results include pending proposals and background status |
 | `/hermes-memory/pending` | GET / POST | List proposals, or approve or discard a specific proposal ID |
+| `/hermes-memory/export` | GET | Download current entries, full bookkeeping, and a separate v1 document |
+| `/hermes-memory/compact` | POST | Compact resolved details using `before` and `maxDetailed`, retaining replay markers |
 
 For HTTP 401, reopen the page through the DSH login entry. HTTP 503 indicates that authentication or storage services are unavailable. Failed panel operations preserve drafts, the last successful snapshot, and pending proposals instead of displaying an empty store or a false success state.
 
@@ -178,7 +182,7 @@ For HTTP 401, reopen the page through the DSH login entry. HTTP 503 indicates th
 | Approval for background changes and deletions, with complete original-entry pins | Adapted; only the authenticated owner can approve or discard through the DSH panel |
 | External providers, automatic skill maintenance, native `session_search` | Outside this plugin's dual-bank scope; chat retrieval uses host capabilities |
 | Native threat scanner | Replaced with a bounded local heuristic adaptation; not claimed to be equivalent, and false positives or negatives are possible |
-| File locks and cross-process rereads | Replaced with a single DSH writer instance, serialized writes, and atomic KvUnit publication |
+| File locks and cross-process rereads | Default mode retains DSH single-writer constraints; native `storageRoot` mode adds a shared lease, pre-publish fingerprint checks, and bounded Windows rename retries |
 | Full background agent fork | Replaced with an isolated `llm.prepareCall` loop; no new main session and no recursive agents |
 | Review counters after a main-session fork | DSH rebuilds the count from inherited history, retaining the parent's accumulated user turns instead of starting from zero for a new agent |
 | Background requests in the dynamic VM | Unavailable because the current host exposes no native cancellation controller; use the static bundle |

@@ -19,8 +19,14 @@ function createMedium(initial = {}) {
   let bytes = JSON.stringify({ global: { format: 2, tables }, tables: { memory: {}, user: {} } })
   let writes = 0
   let active = false
+  let runtime = null
   const backend = { kv: { async open(descriptor) {
-    assert.equal(descriptor.name, 'hermes_memory', 'this fixture must not open background runtime storage')
+    if (descriptor.name === 'hermes_memory_runtime') return {
+      loadAll: async () => ({ global: clone(runtime), tables: {} }),
+      async setGlobal(value) { runtime = clone(value) },
+      async close() {},
+    }
+    assert.equal(descriptor.name, 'hermes_memory')
     assert.equal(descriptor.version, 2)
     assert.equal(active, false, 'the previous plugin instance must close before reopening')
     active = true

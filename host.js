@@ -759,6 +759,126 @@ function createReviewScheduler({ ctx, projection, settings, enabledBanks, claimR
 }
 
 
+// lib/maintenance.js
+/** Pure, portable owner-maintenance helpers; also bundled in the sandbox. */
+const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+const copy = value => JSON.parse(JSON.stringify(value))
+const banks = ['memory', 'user']
+const isoTime = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) && Number.isFinite(Date.parse(value))
+const canonical = value => {
+  if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']'
+  if (isObject(value)) return '{' + Object.keys(value).sort().map(key => JSON.stringify(key) + ':' + canonical(value[key])).join(',') + '}'
+  return JSON.stringify(value)
+}
+const rotate = (value, count) => value >>> count | value << (32 - count)
+/** SHA-256 of canonical JSON with UTF-8 encoding, including lone-surrogate replacement. */
+function payloadSha256(value) {
+  const text = canonical(value), bytes = []
+  for (let index = 0; index < text.length; index++) {
+    let point = text.codePointAt(index)
+    if (point > 0xffff) index++
+    else if (point >= 0xd800 && point <= 0xdfff) point = 0xfffd
+    if (point < 0x80) bytes.push(point)
+    else if (point < 0x800) bytes.push(0xc0 | point >>> 6, 0x80 | point & 63)
+    else if (point < 0x10000) bytes.push(0xe0 | point >>> 12, 0x80 | point >>> 6 & 63, 0x80 | point & 63)
+    else bytes.push(0xf0 | point >>> 18, 0x80 | point >>> 12 & 63, 0x80 | point >>> 6 & 63, 0x80 | point & 63)
+  }
+  const length = bytes.length
+  bytes.push(0x80)
+  while (bytes.length % 64 !== 56) bytes.push(0)
+  const high = Math.floor(length / 0x20000000), low = length * 8 >>> 0
+  for (const word of [high, low]) bytes.push(word >>> 24 & 255, word >>> 16 & 255, word >>> 8 & 255, word & 255)
+  const k = [0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]
+  const state = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]
+  for (let offset = 0; offset < bytes.length; offset += 64) {
+    const words = new Array(64)
+    for (let i = 0; i < 16; i++) words[i] = bytes[offset + i * 4] << 24 | bytes[offset + i * 4 + 1] << 16 | bytes[offset + i * 4 + 2] << 8 | bytes[offset + i * 4 + 3]
+    for (let i = 16; i < 64; i++) {
+      const x = words[i - 15], y = words[i - 2]
+      words[i] = (words[i - 16] + (rotate(x, 7) ^ rotate(x, 18) ^ x >>> 3) + words[i - 7] + (rotate(y, 17) ^ rotate(y, 19) ^ y >>> 10)) | 0
+    }
+    let [a,b,c,d,e,f,g,h] = state
+    for (let i = 0; i < 64; i++) {
+      const t1 = (h + (rotate(e, 6) ^ rotate(e, 11) ^ rotate(e, 25)) + (e & f ^ ~e & g) + k[i] + words[i]) | 0
+      const t2 = ((rotate(a, 2) ^ rotate(a, 13) ^ rotate(a, 22)) + (a & b ^ a & c ^ b & c)) | 0
+      h=g; g=f; f=e; e=d+t1|0; d=c; c=b; b=a; a=t1+t2|0
+    }
+    for (const [i, word] of [a,b,c,d,e,f,g,h].entries()) state[i] = state[i] + word | 0
+  }
+  return state.map(word => (word >>> 0).toString(16).padStart(8, '0')).join('')
+}
+
+function validateRuntime(data) {
+  if (!isObject(data) || data.format !== 1 || !isObject(data.pending) || !isObject(data.reviews)) throw new Error('Malformed memory runtime metadata')
+  for (const [key, record] of Object.entries(data.pending)) {
+    if (!isObject(record) || typeof record.status !== 'string') throw new Error('Malformed proposal: ' + key)
+    const pins = record.pins ?? record.pinnedIdentities
+    if (pins !== undefined && (!Array.isArray(pins) || pins.some(pin => !isObject(pin) || (pin.staged !== true && (!Number.isSafeInteger(pin.seq) || pin.seq < 1)) || !Number.isSafeInteger(pin.operation) || pin.operation < 0))) throw new Error('Malformed proposal identities: ' + key)
+  }
+  for (const [key, record] of Object.entries(data.reviews)) {
+    if (!isObject(record) || typeof record.status !== 'string' || !Number.isSafeInteger(record.turn) || record.turn < 0) throw new Error('Malformed review claim: ' + key)
+  }
+  return data
+}
+
+function compactRuntime(data, { before, maxDetailed = 100, now = new Date().toISOString() } = {}) {
+  validateRuntime(data)
+  if (!isoTime(before)) throw new Error('Specify before as an ISO timestamp with a timezone')
+  if (!isoTime(now)) throw new Error('Invalid compaction timestamp')
+  if (!Number.isSafeInteger(maxDetailed) || maxDetailed < 0 || maxDetailed > 10000) throw new Error('maxDetailed must be an integer from 0 to 10000')
+  const result = copy(data), counts = { pending: 0, reviews: 0 }
+  for (const collection of ['pending', 'reviews']) {
+    const terminal = collection === 'pending' ? ['approved', 'discarded'] : ['completed', 'error', 'failed', 'cancelled', 'max-iterations', 'interrupted']
+    const detailed = Object.entries(data[collection]).filter(([, row]) => !row.compacted && terminal.includes(row.status) && isoTime(row.finishedAt))
+      .sort(([a, x], [b, y]) => Date.parse(y.finishedAt) - Date.parse(x.finishedAt) || a.localeCompare(b))
+    for (const [key, row] of detailed.slice(maxDetailed)) {
+      if (Date.parse(row.finishedAt) >= Date.parse(before)) continue
+      const marker = { compacted: true, compactedAt: now, payloadSha256: payloadSha256(row) }
+      for (const name of ['id', 'target', 'sessionId', 'turn', 'status', 'createdAt', 'startedAt', 'finishedAt', 'iterations', 'writes', 'pending', 'toolCalls']) {
+        if (row[name] !== undefined) marker[name] = copy(row[name])
+      }
+      if (collection === 'pending') marker.pinnedIdentities = (row.pins || row.pinnedIdentities || []).map(({ operation, seq, staged }) => staged === true ? { operation, staged: true } : { operation, seq })
+      Object.defineProperty(result[collection], key, { value: marker, enumerable: true, configurable: true, writable: true })
+      counts[collection]++
+    }
+  }
+  return { data: result, summary: { changed: counts.pending + counts.reviews > 0, compactedProposals: counts.pending, compactedReviews: counts.reviews,
+    proposalMarkers: Object.keys(result.pending).length, reviewMarkers: Object.keys(result.reviews).length, before, maxDetailed,
+    note: 'Old resolved payloads compacted; all replay markers and unresolved approval evidence retained. Total metadata size is not capped.' } }
+}
+
+function memoryTables(snapshot) {
+  if (!isObject(snapshot) || !isObject(snapshot.tables) || !Object.hasOwn(snapshot, 'global')) throw new Error('Malformed memory snapshot')
+  if (snapshot.global !== null && (!isObject(snapshot.global) || snapshot.global.format !== 2)) throw new Error('Unsupported memory snapshot format')
+  const tables = snapshot.global === null ? snapshot.tables : snapshot.global.tables
+  if (!isObject(tables)) throw new Error('Malformed memory tables')
+  for (const bank of banks) {
+    if (!isObject(tables[bank])) throw new Error('Malformed memory bank: ' + bank)
+    const seen = new Set()
+    for (const row of Object.values(tables[bank])) {
+      if (!isObject(row) || typeof row.text !== 'string' || !Number.isSafeInteger(row.seq) || row.seq < 1 || seen.has(row.seq)) throw new Error('Malformed memory record in ' + bank)
+      seen.add(row.seq)
+    }
+    const high = snapshot.global?.seqHighWater
+    if (high !== undefined && (!isObject(high) || !Number.isSafeInteger(high[bank]) || high[bank] < [...seen].reduce((maximum, seq) => Math.max(maximum, seq), 0))) throw new Error('Malformed memory sequence high-water')
+  }
+  return tables
+}
+
+function createMemoryExport(memorySnapshot, runtimeSnapshot, { createdAt = new Date().toISOString() } = {}) {
+  if (!isoTime(createdAt)) throw new Error('Invalid export timestamp')
+  const tables = memoryTables(memorySnapshot)
+  if (!isObject(runtimeSnapshot) || !isObject(runtimeSnapshot.tables) || !Object.hasOwn(runtimeSnapshot, 'global')) throw new Error('Malformed runtime snapshot')
+  if (runtimeSnapshot.global !== null) validateRuntime(runtimeSnapshot.global)
+  return { format: 1, createdAt,
+    entries: Object.fromEntries(banks.map(bank => [bank, Object.values(tables[bank]).sort((a, b) => a.seq - b.seq).map(row => row.text)])),
+    bookkeeping: { memorySnapshot: copy(memorySnapshot), runtimeSnapshot: copy(runtimeSnapshot) },
+    v1Document: { unit: { name: 'hermes_memory', version: 1 }, global: null, tables: copy(tables) },
+    warnings: ['Private owner export includes disabled banks and full bookkeeping.', 'The v1 document contains current entries only; runtime claims and proposals remain exclusively in bookkeeping.', 'Stop all writers, keep both original files, and use a separate directory for downgrade recovery. This export does not install a downgrade.'],
+  }
+}
+
+
 /**
  * dsh-hermes-memory — Hermes-style persistent memory for DeepSeek Harness.
  *
@@ -834,6 +954,7 @@ async function apply(ctx, config) {
   let lastOpenAttemptAt = 0
   let scheduler = null
   const runtime = { unit: null, data: null, promise: null, error: null, unknown: false }
+  const ownedStorage = { backend: null, promise: null }
   const projection = await ctx.sessionProjections.register({
     key: 'hermesMemory', stateVersion: 2,
     stateSchema: { parse(value) {
@@ -878,13 +999,30 @@ async function apply(ctx, config) {
     return `${pct}% — ${current.toLocaleString()}/${limit.toLocaleString()} chars`
   }
   const storageBackend = () => {
+    if (config.storageRoot !== undefined) return ownedStorage.backend || undefined
     const storage = ctx.get('storage')
     if (storage === undefined) return undefined
     return storage.backend.get('json')
   }
 
+  async function resolveStorageBackend() {
+    if (config.storageRoot !== undefined && !ownedStorage.backend) {
+      if (!ownedStorage.promise) ownedStorage.promise = Promise.reject(new Error('Guarded storage requires the native static bundle'))
+        .then(module => module.createGuardedStorage(config.storageRoot))
+        .then(backend => (ownedStorage.backend = backend))
+        .catch(error => { ownedStorage.promise = null; throw error })
+      await ownedStorage.promise
+    }
+    return storageBackend()
+  }
+  const storageStatus = () => config.storageRoot !== undefined
+    ? ownedStorage.backend?.status() || { mode: 'guarded-native', state: 'unavailable' }
+    : { mode: 'host-json', crossProcessLock: false, externalChangeCheck: false, renameRetry: 'host-dependent' }
   const cloneJson = value => JSON.parse(JSON.stringify(value))
   async function ensureRuntime() {
+    // Runtime recovery is a write: a losing instance must never acquire it
+    // before proving ownership of the main memory unit.
+    await ensureReady()
     if (runtime.unknown) throw new Error('Memory runtime outcome is unknown; reload the plugin before retrying')
     if (runtime.data) return
     if (!runtime.promise) runtime.promise = (async () => {
@@ -894,7 +1032,7 @@ async function apply(ctx, config) {
       try {
         const snap = await unit.loadAll()
         const data = snap.global === null ? { format: 1, pending: {}, reviews: {} } : snap.global
-        if (!data || data.format !== 1 || !data.pending || !data.reviews || Array.isArray(data.pending) || Array.isArray(data.reviews)) throw new Error('Malformed memory runtime metadata')
+        validateRuntime(data)
         const recovered = cloneJson(data)
         let changed = false
         for (const record of Object.values(recovered.reviews)) if (record.status === 'running') {
@@ -904,6 +1042,12 @@ async function apply(ctx, config) {
           record.status = 'interrupted'; record.error = 'Approval outcome may have been committed; inspect current memory before discarding'; changed = true
         }
         if (changed) { try { await unit.setGlobal(recovered) } catch (error) { runtime.unknown = true; throw error } }
+        // Older v2 snapshots did not persist sequence high-water marks. Pins
+        // still in runtime history must reserve their identities before any write.
+        for (const record of Object.values(recovered.pending)) {
+          if (!BANKS.includes(record.target)) continue
+          for (const pin of record.pins || record.pinnedIdentities || []) if (Number.isSafeInteger(pin.seq) && pin.seq > store.seq[record.target]) store.seq[record.target] = pin.seq
+        }
         runtime.unit = unit; runtime.data = recovered; runtime.error = null
       } catch (error) { await unit.close(); throw error }
     })().catch(error => {
@@ -948,7 +1092,7 @@ async function apply(ctx, config) {
 
   // ---------------- 存储（单一持有者，失败不覆盖） ----------------
   async function openStore() {
-    const backend = storageBackend()
+    const backend = await resolveStorageBackend()
     if (backend === undefined || backend.kv === undefined) throw new Error('json 存储后端不可用')
     // Version 2 commits both banks as one singleton, so a batch is one durable write.
     // Version 1 table records remain available as an upgrade recovery copy.
@@ -976,6 +1120,14 @@ async function apply(ctx, config) {
           seq[bank] = Math.max(seq[bank], record.seq)
         }
       }
+      if (snap.global?.seqHighWater !== undefined) {
+        const high = snap.global.seqHighWater
+        if (!high || typeof high !== 'object' || Array.isArray(high)
+          || BANKS.some(bank => !Number.isSafeInteger(high[bank]) || high[bank] < seq[bank])) {
+          throw new Error('Malformed memory sequence high-water; saved data was left unchanged')
+        }
+        for (const bank of BANKS) seq[bank] = high[bank]
+      }
       store.tables = loaded
       store.seq = seq
       store.unit = unit
@@ -991,7 +1143,17 @@ async function apply(ctx, config) {
   let initPromise = null
   function ensureReady() {
     if (store.disposed) return Promise.reject(new Error('memory plugin is disposed'))
-    if (store.ready) return Promise.resolve()
+    const safety = ownedStorage.backend?.status()
+    if (safety && safety.state !== 'open') {
+      store.ready = false
+      store.error = safety.error?.message || 'Guarded memory storage is unavailable; reload after inspection'
+      return Promise.reject(new Error(store.error))
+    }
+    if (store.ready) return ownedStorage.backend ? store.unit.loadAll().then(() => {}, error => {
+      store.ready = false
+      store.error = String(error.message || error)
+      throw error
+    }) : Promise.resolve()
     if (initPromise === null) {
       initPromise = openStore().catch((e) => {
         store.error = String((e && e.message) || e)
@@ -1026,9 +1188,14 @@ async function apply(ctx, config) {
       store.ready = false
       const unit = store.unit
       store.unit = null
-      if (unit) await unit.close()
-      if (runtime.unit) await runtime.unit.close()
-      runtime.unit = null
+      try {
+        const results = await Promise.allSettled([unit?.close(), runtime.unit?.close()])
+        const failed = results.find(result => result.status === 'rejected')
+        if (failed) throw failed.reason
+      } finally {
+        runtime.unit = null
+        await ownedStorage.backend?.close()
+      }
     }
   })
 
@@ -1041,7 +1208,7 @@ async function apply(ctx, config) {
     if (runtime.unknown) throw new Error('Memory runtime outcome is unknown; reload the plugin before retrying')
     if (!ENABLED_BANKS.includes(bank)) return { success: false, target: bank, error: 'Memory bank is disabled: ' + bank }
     if (options.signal?.aborted) throw new Error('Memory write was cancelled')
-    if (options.background || options.approvalId) await ensureRuntime()
+    await ensureRuntime()
     if (operations.length === 0) {
       return consolidationFailure(failures, MAX_CONSOLIDATION_FAILURES, bank, { success: false, target: bank, error: 'operations list is empty.' }, sessionId)
     }
@@ -1069,7 +1236,10 @@ async function apply(ctx, config) {
       if (op.action !== 'add') {
         const needle = op.oldText ?? op.old_text
         const matched = findEntryMatches(working, needle).map(match => match.entry)
-        if (matched.length && new Set(matched.map(record => record.text)).size === 1) pins.push({ operation: i, seq: matched[0].seq, matched_entry: matched[0].text })
+        if (matched.length && new Set(matched.map(record => record.text)).size === 1) {
+          const entry = matched[0]
+          pins.push({ operation: i, ...(recs.some(record => record.seq === entry.seq) ? { seq: entry.seq } : { staged: true }), matched_entry: entry.text })
+        }
       }
       const failure = stepOperation(working, op, `Operation ${i + 1} (${op.action})`, seqCounter, options.exactEntry)
       if (failure !== null) {
@@ -1135,7 +1305,8 @@ async function apply(ctx, config) {
     if (tasks.length > 0) {
       const tables = Object.fromEntries(BANKS.map(name => [name, Object.fromEntries(name === bank ? updated : store.tables[name])]))
       try {
-        await store.unit.setGlobal({ format: 2, tables })
+        const seqHighWater = { ...store.seq, [bank]: seqCounter.next - 1 }
+        await store.unit.setGlobal({ format: 2, tables, seqHighWater })
       } catch (error) {
         {
           store.ready = false
@@ -1227,6 +1398,7 @@ async function apply(ctx, config) {
     const record = runtime.data.pending[args.id]
     if (!record) return { success: false, error: 'Pending proposal not found' }
     if (args.action === 'discard') {
+      if (!['pending', 'applying', 'interrupted'].includes(record.status)) return { success: false, error: 'Proposal is already resolved: ' + record.status }
       const data = cloneJson(runtime.data)
       data.pending[args.id].status = 'discarded'; data.pending[args.id].finishedAt = new Date().toISOString()
       await saveRuntime(data)
@@ -1252,6 +1424,27 @@ async function apply(ctx, config) {
     value => JSON.stringify(value), args => args.action === 'list' ? pendingAction({ action: 'list' })
       : { success: false, error: 'Only the authenticated memory panel can approve or discard proposals.' },
   ))
+
+  // Maintenance is owner-only; no model tool can compact or export hidden banks.
+  const maintenance = args => enqueue(async () => {
+    await ensureReady()
+    if (runtime.unknown) throw new Error('Memory runtime outcome is unknown; reload the plugin before retrying')
+    if (args.action === 'export') {
+      // A read-only backup must not recover/rewrite in-flight evidence on GET.
+      const unit = runtime.unit || await storageBackend().kv.open({ name: 'hermes_memory_runtime', version: 1, tables: [], hasGlobal: true })
+      try { return createMemoryExport(await store.unit.loadAll(), await unit.loadAll(), { createdAt: new Date().toISOString() }) }
+      finally { if (unit !== runtime.unit) await unit.close() }
+    }
+    if (args.action === 'compact') {
+      await ensureRuntime()
+      await store.unit.loadAll()
+      await runtime.unit.loadAll()
+      const result = compactRuntime(runtime.data, { before: args.before, maxDetailed: args.maxDetailed })
+      if (result.summary.changed) await saveRuntime(result.data)
+      return { success: true, ...result.summary }
+    }
+    throw new Error('Specify export or compact')
+  })
 
   // memory_search —— 确定性关键词检索
   ctx.effect(() => registerTool(
@@ -1315,10 +1508,10 @@ async function apply(ctx, config) {
     async (_args, _exec) => {
       try { await ensureReady() } catch (e) { return { ready: false, error: String((e && e.message) || e) } }
       return {
-        ready: true, pendingCount: pendingCount(),
+        ready: true, pendingCount: pendingCount(), storageSafety: storageStatus(),
         memory: { enabled: ENABLED_BANKS.includes('memory'), entries: entriesOf('memory').length, usage: usageLine('memory') },
         user: { enabled: ENABLED_BANKS.includes('user'), entries: entriesOf('user').length, usage: usageLine('user') },
-        file: '~/.dsh/storages/hermes_memory.json',
+        file: config.storageRoot !== undefined ? storageStatus().root + '/hermes_memory.json' : '~/.dsh/storages/hermes_memory.json',
       }
     },
   ))
@@ -1351,7 +1544,7 @@ async function apply(ctx, config) {
         storeError: store.error,
         storeOpenAttempts: store.openAttempts,
         hasUnit: store.unit !== null, upstreamCommit: UPSTREAM_COMMIT, enabledBanks: ENABLED_BANKS,
-        runtimeError: runtime.error, runtimeUnknown: runtime.unknown, pendingCount: pendingCount(),
+        runtimeError: runtime.error, runtimeUnknown: runtime.unknown, pendingCount: pendingCount(), storageSafety: storageStatus(),
         backgroundReview: scheduler?.status(),
       }
     },
@@ -1417,7 +1610,8 @@ async function apply(ctx, config) {
     const messages = []
     try {
       if (failures.size > 1000) failures.delete(failures.keys().next().value)
-      if (!store.ready) {
+      if (ownedStorage.backend) await ensureReady()
+      else if (!store.ready) {
         const now = Date.now()
         if (now - lastOpenAttemptAt >= 30000) {
           lastOpenAttemptAt = now
@@ -1507,6 +1701,33 @@ async function apply(ctx, config) {
       return raw + decoder.decode()
     }
     ctx.effect(() => wsrv.register({
+      kind: 'exact', path: '/hermes-memory/export',
+      handler: async (req, res) => {
+        if (!authorize(req, res, 'GET')) return
+        try {
+          const out = await maintenance({ action: 'export' })
+          res.setHeader('Content-Disposition', 'attachment; filename="hermes-memory-export.json"')
+          json(res, 200, out)
+        } catch (error) { json(res, 503, { success: false, error: String(error.message || error) }) }
+      },
+    }))
+    ctx.effect(() => wsrv.register({
+      kind: 'exact', path: '/hermes-memory/compact',
+      handler: async (req, res) => {
+        if (!authorize(req, res, 'POST')) return
+        let args
+        try {
+          args = JSON.parse(await readBody(req))
+          if (!args || typeof args !== 'object' || Array.isArray(args)
+            || Object.keys(args).some(key => !['before', 'maxDetailed'].includes(key))
+            || typeof args.before !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(args.before) || !Number.isFinite(Date.parse(args.before))
+            || (args.maxDetailed !== undefined && (!Number.isSafeInteger(args.maxDetailed) || args.maxDetailed < 0 || args.maxDetailed > 10000))) throw new Error('Specify a valid before date and maxDetailed from 0 to 10000')
+        } catch (error) { json(res, error.status || 400, { success: false, error: String(error.message || error) }); return }
+        try { json(res, 200, await maintenance({ ...args, action: 'compact' })) }
+        catch (error) { json(res, 503, { success: false, error: String(error.message || error) }) }
+      },
+    }))
+    ctx.effect(() => wsrv.register({
       kind: 'exact', path: '/hermes-memory/pending',
       handler: async (req, res) => {
         if (!authorize(req, res, req.method === 'GET' ? 'GET' : 'POST')) return
@@ -1537,8 +1758,8 @@ async function apply(ctx, config) {
           error: store.error,
           memory: { enabled: ENABLED_BANKS.includes('memory'), entries: entriesOf('memory').length, usage: usageLine('memory') },
           user: { enabled: ENABLED_BANKS.includes('user'), entries: entriesOf('user').length, usage: usageLine('user') },
-          file: '~/.dsh/storages/hermes_memory.json',
-          recent, backgroundReview: scheduler.status(),
+          file: config.storageRoot !== undefined ? storageStatus().root + '/hermes_memory.json' : '~/.dsh/storages/hermes_memory.json',
+          recent, backgroundReview: scheduler.status(), storageSafety: storageStatus(),
         })
       },
     }))
@@ -1564,7 +1785,7 @@ async function apply(ctx, config) {
           if (['approve', 'discard'].includes(input.action)) {
             const out = await pendingAction(input, { source: 'owner-ui' }); json(res, out.success ? 200 : 422, out); return
           }
-          if (input.action === 'list') await ensureRuntime()
+          if (input.action === 'list') await enqueue(() => ensureRuntime())
           await ensureReady()
           await store.chain
           const bank = input.bank === 'user' ? 'user' : 'memory'

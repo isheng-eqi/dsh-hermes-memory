@@ -16,6 +16,7 @@
   "files": [
     "lib",
     "scripts/build-host.mjs",
+    "scripts/memory-maintenance.mjs",
     "locale/*.json",
     "icon.svg",
     "cordis.patch.yml",
@@ -27,6 +28,7 @@
     "THIRD_PARTY_NOTICES.md",
     "docs/2026-11-09_compatibility-and-hermes-report.md",
     "docs/2026-11-11_hermes-memory-implementation-report.md",
+    "docs/storage-safety.md",
     "LICENSE"
   ],
   "keywords": [

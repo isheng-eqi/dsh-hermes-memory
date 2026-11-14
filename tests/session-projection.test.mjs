@@ -34,12 +34,14 @@ for (const mode of ['static', 'dynamic']) {
     let releaseOpen, storageFailure = null
     const openGate = new Promise(resolve => { releaseOpen = resolve })
     let saved = { global: null, tables: { memory: {}, user: {} } }
+    let runtimeSaved = { global: null, tables: {} }
     ctx.provide('storage', { backend: { get: () => ({ kv: {
-      async open() {
+      async open(descriptor) {
         await openGate
+        const isRuntime = descriptor.name === 'hermes_memory_runtime'
         return {
-          loadAll: async () => structuredClone(saved),
-          async setGlobal(global) { if (storageFailure) throw storageFailure; saved.global = structuredClone(global) },
+          loadAll: async () => structuredClone(isRuntime ? runtimeSaved : saved),
+          async setGlobal(global) { if (storageFailure) throw storageFailure; if (isRuntime) runtimeSaved.global = structuredClone(global); else saved.global = structuredClone(global) },
           async close() {},
         }
       },

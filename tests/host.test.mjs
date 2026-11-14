@@ -24,7 +24,7 @@ async function mount(t, mode, options = {}) {
   const events = new Map()
   const disposers = []
   const projections = projectionFixture()
-  const backend = {
+  const backend = options.backend || {
     kv: {
       async open(descriptor) {
         if (descriptor.name === 'hermes_memory_runtime') return {
@@ -405,6 +405,43 @@ for (const mode of ['static', 'dynamic']) {
   })
 }
 
+for (const mode of ['static', 'dynamic']) {
+  test(`${mode}: an instance without the main unit cannot claim or recover runtime metadata`, async t => {
+    const runtime = { format: 1, pending: {}, reviews: { 'session:previous': { turn: 10, status: 'running' } } }
+    const owner = await mount(t, 'static', { runtime })
+    assert.equal((await owner.call('memory_stats')).ready, true)
+    const loser = await mount(t, mode, { backend: owner.backend })
+    assert.equal((await loser.call('memory_stats')).ready, false)
+    await assert.rejects(loser.call('memory_pending', { action: 'list' }), /already open/)
+    assert.equal((await loser.request('/hermes-memory/export', { method: 'GET' })).status, 503)
+    assert.deepEqual(owner.runtime().global, runtime, 'losing instance must not recover or write runtime')
+    await loser.dispose()
+    assert.equal(owner.counters().closed, 0, 'losing teardown must not close the owner handle')
+    assert.equal((await owner.call('memory', { action: 'add', content: 'Owner still writes' })).success, true)
+  })
+
+  test(`${mode}: removal and reopen never reuse entry sequence identities for a pending proposal`, async t => {
+    const h = await mount(t, mode)
+    await h.request('/hermes-memory/ops', { body: { action: 'add', bank: 'user', content: 'Synthetic original' } })
+    const runtime = { format: 1, pending: { 'proposal-old': {
+      id: 'proposal-old', target: 'user', status: 'pending',
+      operations: [{ action: 'patch', old_text: 'Synthetic original', content: 'Stale replacement' }],
+      pins: [{ operation: 0, seq: 1, matched_entry: 'Synthetic original' }],
+    } }, reviews: {} }
+    await h.request('/hermes-memory/ops', { body: { action: 'remove', bank: 'user', oldText: 'Synthetic original' } })
+    const snapshot = h.snapshot()
+    assert.equal(snapshot.global.seqHighWater.user, 1)
+    await h.dispose()
+    const restored = await mount(t, mode, { snapshot, runtime })
+    await restored.request('/hermes-memory/ops', { body: { action: 'add', bank: 'user', content: 'Synthetic original' } })
+    assert.equal(restored.snapshot().global.seqHighWater.user, 2)
+    const approved = await restored.request('/hermes-memory/pending', { body: { action: 'approve', id: 'proposal-old' } })
+    assert.equal(approved.value.success, false)
+    assert.match(approved.value.error, /stale/)
+    assert.deepEqual((await restored.call('memory_list')).user, ['Synthetic original'])
+  })
+}
+
 function scriptedLlm(responses) {
   const requests = []
   let index = 0
@@ -538,6 +575,83 @@ test('static: disabled banks leave bytes intact but disappear from snapshot, sch
   assert.equal((await both.pre()).messages.length, 0)
 })
 
+for (const mode of ['static', 'dynamic']) {
+  test(`${mode}: owner export includes current disabled-bank entries and separates downgrade data from bookkeeping`, async t => {
+    const current = { memory: { a: record('Current synthetic note') }, user: { b: record('Hidden synthetic preference', 2) } }
+    const runtime = { format: 1, pending: {}, reviews: { 'session:old': { turn: 10, status: 'completed' } } }
+    const h = await mount(t, mode, { snapshot: { global: { format: 2, tables: current }, tables: { memory: { a: record('Obsolete note') }, user: {} } }, runtime,
+      config: { memoryEnabled: false, userEnabled: false } })
+    assert.equal((await h.request('/hermes-memory/export', { method: 'GET', auth: false })).status, 401)
+    assert.equal((await h.request('/hermes-memory/export', { method: 'GET', origin: 'https://foreign.invalid' })).status, 403)
+    assert.equal((await h.request('/hermes-memory/export', { method: 'POST' })).status, 405)
+    const out = await h.request('/hermes-memory/export', { method: 'GET' })
+    assert.equal(out.status, 200)
+    assert.deepEqual(out.value.entries, { memory: ['Current synthetic note'], user: ['Hidden synthetic preference'] })
+    assert.deepEqual(out.value.v1Document.tables, current)
+    assert.equal(out.value.v1Document.unit.version, 1)
+    assert.equal(out.value.v1Document.global, null)
+    assert.deepEqual(out.value.bookkeeping.runtimeSnapshot.global, runtime)
+    assert.equal(h.counters().writes, 0, 'export must not write memory or install a downgrade')
+  })
+
+  test(`${mode}: cold export preserves in-flight evidence without recovery writes; later access still recovers it`, async t => {
+    const runtime = { format: 1, pending: { p: { id: 'p', target: 'user', status: 'applying', operations: [], pins: [] } },
+      reviews: { 'session:s': { sessionId: 's', turn: 10, status: 'running' } } }
+    const h = await mount(t, mode, { runtime })
+    const exported = await h.request('/hermes-memory/export', { method: 'GET' })
+    assert.equal(exported.status, 200)
+    assert.deepEqual(exported.value.bookkeeping.runtimeSnapshot.global, runtime)
+    assert.deepEqual(h.runtime().global, runtime, 'GET must preserve original evidence without recovery')
+    const out = await h.request('/hermes-memory/pending', { method: 'GET' })
+    assert.equal(out.value.pending[0].status, 'interrupted')
+    assert.equal(h.runtime().global.reviews['session:s'].status, 'interrupted')
+  })
+
+  test(`${mode}: owner compaction preserves claims and unresolved proposals, rejects replay, and validates input`, async t => {
+    const old = '2026-01-01T00:00:00.000Z'
+    const proposal = id => ({ id, target: 'user', status: 'approved', finishedAt: old,
+      operations: [{ action: 'add', content: 'Old private text' }], pins: [] })
+    const uncertain = { ...proposal('uncertain'), status: 'interrupted' }
+    const runtime = { format: 1, pending: { approved: proposal('approved'), uncertain },
+      reviews: { 'session:session-test': { sessionId: 'session-test', turn: 10, status: 'completed', finishedAt: old, provenance: { text: 'Old evidence' } } } }
+    const h = await mount(t, mode, { runtime })
+    const body = { before: '2026-02-01T00:00:00.000Z', maxDetailed: 0 }
+    assert.equal((await h.request('/hermes-memory/compact', { auth: false, body })).status, 401)
+    assert.equal((await h.request('/hermes-memory/compact', { origin: 'https://foreign.invalid', body })).status, 403)
+    assert.equal((await h.request('/hermes-memory/compact', { method: 'GET' })).status, 405)
+    for (const invalid of [{}, { before: 'not-a-date' }, { ...body, maxDetailed: -1 }, { ...body, extra: true }]) {
+      assert.equal((await h.request('/hermes-memory/compact', { body: invalid })).status, 400)
+    }
+    const compacted = await h.request('/hermes-memory/compact', { body })
+    assert.equal(compacted.status, 200)
+    assert.equal(compacted.value.success, true)
+    assert.equal(compacted.value.changed, true)
+    const saved = h.runtime().global
+    assert.equal(saved.pending.approved.compacted, true)
+    assert.equal(saved.pending.approved.operations, undefined)
+    assert.match(saved.pending.approved.payloadSha256, /^[a-f0-9]{64}$/)
+    assert.deepEqual(saved.pending.uncertain, uncertain)
+    assert.equal(saved.reviews['session:session-test'].turn, 10)
+    const approved = await h.request('/hermes-memory/pending', { body: { action: 'approve', id: 'approved' } })
+    assert.equal(approved.value.success, false)
+    assert.match(approved.value.error, /cannot be reapplied/)
+    assert.equal((await h.request('/hermes-memory/compact', { body })).value.changed, false)
+    await h.emit('turn/end', { turn: 10, reason: { kind: 'completed' } })
+    assert.deepEqual(h.runtime().global, saved)
+  })
+}
+
+test('static: compacted review high-water blocks a completed trigger after reload', async t => {
+  const llm = scriptedLlm(['Nothing to save.'])
+  const h = await mount(t, 'static', { llm, runtime: { format: 1, pending: {}, reviews: {
+    'session:session-test': { sessionId: 'session-test', turn: 10, status: 'completed', compacted: true, payloadSha256: 'a'.repeat(64) },
+  } } })
+  for (let turn = 1; turn <= 10; turn++) await completeTurn(h, turn)
+  assert.equal(llm.requests.length, 0)
+  for (let turn = 11; turn <= 20; turn++) await completeTurn(h, turn)
+  assert.equal(llm.requests.length, 1)
+})
+
 for (const bank of ['memory', 'user']) {
   test(`static: disabling ${bank} hides persisted proposal contents from models while owner management retains them`, async t => {
     const visibleBank = bank === 'memory' ? 'user' : 'memory'
@@ -602,6 +716,9 @@ test('static: ordinary EIO after durable commit poisons the cache and reopen rea
   await assert.rejects(h.call('memory', { action: 'add', content: 'Committed before EIO' }), /rename committed then EIO/)
   await assert.rejects(h.call('memory', { action: 'add', content: 'Must not overwrite it' }), /outcome is unknown/)
   assert.equal(h.counters().writes, 1)
+  assert.equal((await h.request('/hermes-memory/export', { method: 'GET' })).status, 503)
+  assert.equal((await h.request('/hermes-memory/compact', { body: { before: '2026-01-01T00:00:00.000Z' } })).status, 503)
+  assert.equal(h.counters().writes, 1)
   const restored = await mount(t, 'static', { snapshot: h.snapshot() })
   assert.deepEqual((await restored.call('memory_list')).memory, ['Committed before EIO'])
 })
@@ -610,7 +727,25 @@ test('static: runtime write rejection fails closed for proposals and later memor
   const h = await mount(t, 'static', { config: { writeApproval: true }, runtimeFailure: Object.assign(new Error('runtime EIO'), { code: 'EIO' }) })
   await assert.rejects(h.call('memory', { action: 'add', content: 'Proposal' }), /runtime EIO/)
   await assert.rejects(h.call('memory', { action: 'add', content: 'Must not retry blindly' }), /outcome is unknown/)
+  assert.equal((await h.request('/hermes-memory/export', { method: 'GET' })).status, 503)
+  assert.equal((await h.request('/hermes-memory/compact', { body: { before: '2026-01-01T00:00:00.000Z' } })).status, 503)
   assert.equal(h.counters().writes, 0)
+})
+
+test('static: staged add-then-patch pins remain approvable after reload without reserving fictional entries', async t => {
+  const h = await mount(t, 'static', { config: { writeApproval: true } })
+  const staged = await h.call('memory', { action: 'batch', operations: [
+    { action: 'add', content: 'Synthetic draft' }, { action: 'patch', old_text: 'draft', content: 'final' },
+  ] })
+  assert.equal(staged.pending, true)
+  const runtime = h.runtime().global
+  assert.equal(runtime.pending[staged.pendingId].pins[0].staged, true)
+  const snapshot = h.snapshot()
+  await h.dispose()
+  const restored = await mount(t, 'static', { snapshot, runtime, config: { writeApproval: true } })
+  const approved = await restored.request('/hermes-memory/pending', { body: { action: 'approve', id: staged.pendingId } })
+  assert.equal(approved.value.success, true)
+  assert.deepEqual((await restored.call('memory_list')).memory, ['Synthetic final'])
 })
 
 test('static: route override discards route-specific controls, same route retains them, and flush precedes model billing', async t => {

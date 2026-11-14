@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Address [#16](https://github.com/isheng-eqi/dsh-hermes-memory/issues/16): require main-unit ownership before runtime recovery, persist entry sequence high-water marks, and add opt-in native `storageRoot` protection with a shared lease, external-change checks, and bounded Windows rename retries. Keep default host-JSON limits explicit.
+- Add owner-only export and history-detail compaction in the Memory panel and an offline backup/compaction/v1-extraction command. Keep replay claims, proposal identities/hashes, and complete unresolved approval evidence; no total metadata cap or automatic downgrade is claimed. Thanks to [BrierAinz](https://github.com/BrierAinz) for the persistence feedback.
+
 - Put default background-review requests, quota/cost impact, and the opt-out setting before installation in both READMEs. Add reusable outreach wording that matches v2.0.0, correcting earlier emails that said the plugin made no separate LLM requests. Thanks to Simin Yuan and Aleksandar for pointing out the mismatch.
 
 - Archive the obsolete lifecycle design, distinguish static and dynamic message sources, and document resource and runtime-metadata retention limits. Thanks to [Magnus Hedemark (@magnus919)](https://github.com/magnus919) for PRs #8–#10 and #12–#14.

@@ -11,13 +11,16 @@ function withoutImports(source) {
 function withoutExports(source) {
   return source.replace(/^export\s+(?=(?:async\s+)?function\b|const\b|let\b|class\b)/gm, '')
 }
-for (const file of ['core', 'prompts', 'review', 'scheduler']) {
+for (const file of ['core', 'prompts', 'review', 'scheduler', 'maintenance']) {
   const source = normalizeNewlines(await readFile(resolve(root, 'lib', file + '.js'), 'utf8'))
   if (/^import\s/m.test(source)) throw new Error('Dynamic helper must be import-free: ' + file)
   parts.push('// lib/' + file + '.js\n' + withoutExports(source))
 }
 let main = normalizeNewlines(await readFile(resolve(root, 'lib/index.js'), 'utf8'))
 main = withoutImports(main)
+// The sandbox cannot import native filesystem code. Never silently bypass a
+// requested storage guard; native storageRoot configuration belongs to static deployments.
+main = main.replace("import('./guarded-storage.js')", "Promise.reject(new Error('Guarded storage requires the native static bundle'))")
 main = main.replace(/export const Config = Schema\.object\([\s\S]*?^\}\)\s*;?\r?\n/m, '')
 if (/\bSchema\./u.test(main)) throw new Error('Unconverted schema in dynamic implementation')
 main = main.replace("export const name = 'dsh-hermes-memory'", "const name = 'hermes-memory'")

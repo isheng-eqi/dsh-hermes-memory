@@ -472,6 +472,37 @@ test('dynamic: newest RPC wins and an unloaded card receives no state updates', 
   assert.equal(h.runner.updatesAfterUnmount, 0)
 })
 
+test('static: export is an owner download and history compaction requires confirmation and serializes requests', async () => {
+  const pending = deferred()
+  const h = fixture(async (path) => path === '/hermes-memory/compact' ? pending.promise : response(list()))
+  h.show()
+  await tick()
+  let tree = h.render()
+  const link = walk(tree, node => node.type === 'a' && text(node).includes('导出备份'))[0]
+  assert.equal(link.props.href, '/hermes-memory/export')
+  assert.equal(link.props.download, 'hermes-memory-export.json')
+  button(tree, '压缩历史详情').props.onClick()
+  assert.equal(h.calls.length, 1, 'opening confirmation must not compact')
+  tree = h.render()
+  assert.match(text(tree), /30 天.*100 条/)
+  assert.match(text(tree), /结果不明/)
+  button(tree, '取消').props.onClick()
+  assert.equal(h.calls.length, 1)
+  button(h.render(), '压缩历史详情').props.onClick()
+  tree = h.render()
+  const confirm = button(tree, '确认压缩').props.onClick
+  confirm(); confirm()
+  const requests = h.calls.filter(([path]) => path === '/hermes-memory/compact')
+  assert.equal(requests.length, 1)
+  const body = JSON.parse(requests[0][1].body)
+  assert.equal(body.maxDetailed, 100)
+  assert.ok(Math.abs(Date.parse(body.before) - (Date.now() - 30 * 86400000)) < 1000)
+  pending.resolve(response({ success: true }))
+  await tick()
+  assert.equal(walk(h.render(), node => node.props['aria-label'] === '确认压缩历史详情').length, 0)
+  h.dispose()
+})
+
 const checkout = process.env.DSH_CLIENT_TEST_CHECKOUT
 test('real DSH: declaration gate, owner reload, plugin unload and CSS cleanup', { skip: !checkout }, async () => {
   const require = createRequire(join(checkout, 'packages/client/ui-renderer/package.json'))

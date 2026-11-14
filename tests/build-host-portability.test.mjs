@@ -23,6 +23,7 @@ test('host mirror check accepts CRLF checkouts, rejects stale code and builds LF
     prompts: 'export const fixturePrompt = "fixture prompt"\n',
     review: 'export function fixtureReview() { return true }\n',
     scheduler: 'export const fixtureSchedule = false\n',
+    maintenance: 'export const fixtureMaintenance = false\n',
     index: `import Schema from 'schemastery'
 export const Config = Schema.object({
   fixture: Schema.boolean(),
