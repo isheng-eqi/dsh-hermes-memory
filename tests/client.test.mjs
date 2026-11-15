@@ -391,6 +391,22 @@ test('static: row versions stay attached to the original draft and delete confir
   }
 })
 
+test('static: deleting a duplicate row captures that specific row index version', async () => {
+  const h = fixture(async (_path, init) => JSON.parse(init.body).action === 'list'
+    ? response({ ...list(['duplicate entry', 'duplicate entry']), entryVersions: { memory: ['v:row-0', 'v:row-1'], user: [] } })
+    : response({ success: true }))
+  h.show()
+  await tick()
+  const rows = walk(sectionView(h.render()), node => node.props.className === 'hm-row')
+  button(rows[1], '删除').props.onClick()
+  section(h.render()).onConfirmRemove()
+  await tick()
+  const removes = h.calls.map(([, init]) => JSON.parse(init.body)).filter(body => body.action === 'remove')
+  assert.equal(removes.length, 1)
+  assert.equal(removes[0].expectedVersion, 'v:row-1')
+  h.dispose()
+})
+
 test('static: invalid or mismatched row versions are rejected without showing an editable list', async () => {
   for (const entryVersions of [null, [], { memory: [], user: [] }, { memory: [null], user: [] }, { memory: [''], user: [] }]) {
     const h = fixture(async () => response({ ...list(), entryVersions }))
