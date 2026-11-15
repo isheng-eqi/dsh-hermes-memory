@@ -24,19 +24,26 @@ test('portable SHA-256 agrees with Node crypto for canonical Unicode JSON and mu
 })
 
 test('compaction removes resolved content while preserving claim and proposal identities without mutation', () => {
-  const data = { format: 1, pending: { p: proposal('p') }, reviews: { 'session:synthetic-session': review() } }
+  const data = { format: 1, pending: { p: proposal('p') }, reviews: {
+    'session:synthetic-session': { ...review(), toolCalls: 2, usage: { inputTokens: 120, outputTokens: 30, totalTokens: 150 } },
+    'session:unavailable-session': { ...review(20, 'unavailable'), sessionId: 'unavailable-session' },
+  } }
   const original = structuredClone(data)
   const { data: compacted, summary } = compactRuntime(data, options)
   assert.deepEqual(data, original)
   assert.equal(summary.changed, true)
   assert.equal(summary.compactedProposals, 1)
-  assert.equal(summary.compactedReviews, 1)
+  assert.equal(summary.compactedReviews, 2)
   assert.equal(compacted.pending.p.id, 'p')
   assert.equal(compacted.pending.p.target, 'user')
   assert.deepEqual(compacted.pending.p.pinnedIdentities, [{ operation: 0, seq: 9 }])
   assert.equal(compacted.pending.p.payloadSha256, payloadSha256(original.pending.p))
   assert.equal(compacted.reviews['session:synthetic-session'].turn, 10)
   assert.equal(compacted.reviews['session:synthetic-session'].sessionId, 'synthetic-session')
+  assert.equal(compacted.reviews['session:synthetic-session'].toolCalls, 2)
+  assert.deepEqual(compacted.reviews['session:synthetic-session'].usage, { inputTokens: 120, outputTokens: 30, totalTokens: 150 })
+  assert.equal(compacted.reviews['session:unavailable-session'].status, 'unavailable')
+  assert.equal(compacted.reviews['session:unavailable-session'].compacted, true)
   assert.ok(!JSON.stringify(compacted).includes('Sensitive'))
   assert.equal(compacted.pending.p.operations, undefined)
   const repeated = compactRuntime(compacted, { ...options, now: '2026-11-15T00:00:00.000Z' })
