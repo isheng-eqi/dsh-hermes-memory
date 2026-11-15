@@ -2,9 +2,46 @@
 
 This guide addresses [issue #16](https://github.com/isheng-eqi/dsh-hermes-memory/issues/16). All paths below refer to the selected storage directory, which may differ from the Web profile's usual `~/.dsh/storages`.
 
-## Native guarded mode
+## Distinguish the two concurrency boundaries
 
-The default mode continues to use the registered DSH JSON backend. Its open-handle registry prevents duplicate units **in that backend instance**, not across processes or backend instances. Its `loadAll()` reads a cached snapshot. The pinned host's JSON atomic writer has a single rename attempt. Calling `loadAll()` again or retrying an entire failed `setGlobal()` would not provide the requested safeguards.
+**Default `host-json` can silently lose updates when independent writers share the same files.** For example, two DSH service/profile processes on one machine, or two independent backend instances, can load the same directory into separate caches. If one adds a fact and the other later saves its older cached snapshot, the later write can erase the first update: last writer wins. A manual disk edit can likewise be overwritten by a later cached write. Separate profiles are a concern only when configured to share the same files.
+
+Within **one plugin instance**, panel, model, and background-review writes already share the same `enqueue` queue. The panel calls that instance's HTTP routes rather than writing JSON independently. Panel `replace` / `remove` already require the complete original `oldText`, rejecting an ordinary stale A-to-B edit. The row-version protocol below addresses an additional stale-form case; the native storage lease addresses independent file writers.
+
+The registered DSH JSON backend's open-handle registry prevents duplicate units **in that backend instance**, not across processes or backend instances. Its `loadAll()` reads a cached snapshot. The pinned host's JSON atomic writer has a single rename attempt. Calling `loadAll()` again or retrying an entire failed `setGlobal()` does not add cross-process protection or external-change detection.
+
+## Protect panel edits with row versions
+
+`POST /hermes-memory/ops` with `{"action":"list"}` keeps the existing `memory` and `user` string arrays and adds aligned `entryVersions` arrays. Capture the token at the same index as the entry being edited or deleted. These synthetic JSON examples show the relevant response fields and a subsequent request; use the actual text and opaque token from your authenticated list response:
+
+```json
+{
+  "memory": ["A synthetic fact."],
+  "user": [],
+  "entryVersions": {
+    "memory": ["opaque-row-version"],
+    "user": []
+  }
+}
+```
+
+```json
+{
+  "action": "replace",
+  "bank": "memory",
+  "oldText": "A synthetic fact.",
+  "content": "An updated synthetic fact.",
+  "expectedVersion": "opaque-row-version"
+}
+```
+
+For deletion, send `action: "remove"` with the same `bank`, complete `oldText`, and captured `expectedVersion`; omit `content`. The updated official panel captures these values when the edit or deletion starts. The queued commit requires exactly one full-text match and its matching row version. A changed, missing, ambiguous, or outdated row returns HTTP **409 Conflict**; the panel retains the draft or delete confirmation rather than silently applying it to a different version. Refresh to inspect the current entry, then deliberately start a new edit or deletion rather than replacing a retained draft's token automatically.
+
+This detects ABA cases: an entry changes from A to B and back to A, or is deleted and recreated with the same text. Reloading the plugin also invalidates old tokens. Editing a different row does not invalidate the token for an unchanged row. Tokens are opaque, scoped to the current plugin instance, and held in memory; this adds no persisted storage format.
+
+Older HTTP callers that omit `expectedVersion` retain the full-text check and do **not** gain ABA protection. The protocol covers the updated official panel's `replace` / `remove` path, not agent tools or pending approvals. Approval separately checks the current full text and sequence identity, which can still match after a same-identity A-to-B-to-A change. `patch` / `batch` are outside the row-version protocol and return HTTP 400 if supplied with `expectedVersion`. A row token does not detect another process overwriting the underlying JSON files; use the storage protection below for that boundary.
+
+## Native guarded mode
 
 For a native static installation, set `storageRoot` on the existing `hermes-memory` plugin entry to an **absolute directory**:
 
@@ -83,6 +120,8 @@ Point the older installation at that separate directory only after verifying its
 The original top-level v1 tables in a v2 file are an **upgrade-time** recovery copy; they are not kept current by v2 writes. Use export/extraction when current entries are required. An export is a logical snapshot, not a forensic byte-for-byte archive: retain original files together for uncertain-state recovery.
 
 ## Verification scope
+
+On November 15, 2026, the same pinned-host release runner passed **234/234 tests with zero failures or skips** on Windows / Node 24.22.2. The added cases cover queued panel/model conflicts, versioned panel ABA and reload rejection, preservation of draft/delete tokens across refreshes, malformed-token rejection, unrelated-row stability, and explicit review-model selection without fallback. This run uses synthetic memory contents and an isolated model adapter; it does not certify a particular paid model's curation quality.
 
 On November 14, 2026, the strict release runner passed **225/225 tests with zero skips** on Windows / Node 24.22.2 against the clean built DSH checkout `f3803c96974ad4a94195fb97e5c637e9c2a3afe3`. This includes 17 guarded-storage tests and real-host static/dynamic session and persistence integration. Windows sharing failures are injected at the rename boundary; this is not an antivirus-vendor compatibility certification.
 

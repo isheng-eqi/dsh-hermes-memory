@@ -74,7 +74,7 @@ dsh plugin --profile web add dsh-hermes-memory
 
 记忆写入失败时会返回错误，必要时附当前条目与用量，供模型修正同一批操作。前三次合并失败返回原始错误，第 4 次起返回 `done: true` 和停止重试提示。主模型的计数按会话、每轮重置；后台使用独立的本次复盘计数。该提示不是强制拒绝后续工具调用，后台模型循环仍受 16 次请求及超时限制。成功提交会清除失败计数，并明确提示不要重复保存；主模型工具调用后是否继续请求模型由 DSH 控制。
 
-`memory_pending` 只允许模型列出提案。批准、丢弃必须由已登录用户在记忆面板执行，模型不能自行审批，后台复盘也不能访问审批工具。审批会重新验证完整原条目及身份；原条目变化后拒绝使用旧提案覆盖新内容。
+`memory_pending` 只允许模型列出提案。批准、丢弃必须由已登录用户在记忆面板执行，模型不能自行审批，后台复盘也不能访问审批工具。审批重新验证当前完整原条目及序号身份；当前内容或身份不匹配时拒绝应用。审批不使用下述面板行版本协议，不能检测同一身份的条目曾从 A 变为 B 又变回 A 的全部变更历史。
 
 ## 配置后台复盘
 
@@ -84,6 +84,21 @@ dsh plugin --profile web add dsh-hermes-memory
 backgroundReview:
   enabled: false
 ```
+
+**建议为后台复盘单独选择经过验证的低成本工具模型，避免无意中沿用昂贵的前台模型。** 在同一插件条目中同时配置 `provider` 与 `model`：
+
+```yaml
+backgroundReview:
+  enabled: true
+  provider: 'your-configured-provider'
+  model: 'your-tested-tool-model'
+  maxIterations: 4
+  timeoutMs: 120000
+```
+
+这两个名称是占位值，必须替换为 DSH 已配置的供应商与模型 ID。所选模型需要支持 `memory` 工具及其嵌套参数；先用合成事实验证策展质量和上下文容量。`maxIterations: 4` 是可选的更严请求上限，可能使复盘提前结束；费用仍取决于模型、上下文和实际请求数，不保证降低总费用。
+
+省略 `provider` 和 `model` 时仍继承触发回合的模型、参数与相应费用。两项必须一起设置；显式模型出错时显示后台错误，不回退到前台模型，也不改变前台会话的模型。默认行为保持兼容，不替用户选择供应商或将对话发送到新的供应商。
 
 完整默认配置示例（其中 `enabled: true` 会启用后台复盘）：
 
@@ -145,7 +160,9 @@ global: { format: 2, tables: { memory, user }, seqHighWater: { memory, user } }
 
 ### 选择存储保护
 
-默认宿主 JSON 模式串行处理本插件写入，并拒绝同一 backend 实例的重复句柄。它**没有**跨进程锁和外部编辑检测。固定验证版本的 DSH JSON 后端只尝试一次 rename，没有 Windows 临时占用重试；插件不会重试整个 KvUnit 写入，因为报错时可能已发布。
+**同一插件实例内**，面板、主模型和后台复盘的所有写入都通过同一个 `enqueue` 队列串行执行；面板 `replace` / `remove` 还检查完整 `oldText`，所以原条目从 A 变为 B 后，旧表单会被拒绝。面板通过该实例的 HTTP 路由操作，不是独立的文件写入者。新版面板另外使用[行版本令牌](docs/storage-safety.md#protect-panel-edits-with-row-versions)，防止条目改后改回或删后同文重建时被旧表单误认。
+
+**默认 `host-json` 仍存在共享文件丢失更新风险**：同一机器上的两个 DSH 服务／profile 进程，或两个独立 backend 实例，如果共享同一存储目录，各自缓存的读改写会使后一次整份写入覆盖前一次更新（last writer wins）。运行期间手工修改磁盘文件也可能被后续缓存写入覆盖。同一 backend 实例的重复句柄保护不能防住这些情况。固定验证版本的 DSH JSON 后端只尝试一次 rename，没有 Windows 临时占用重试；插件不会重试整个 KvUnit 写入，因为报错时可能已发布。
 
 原生静态安装可设置 **`storageRoot` 为存储目录的绝对路径**，选择插件自有、兼容 DSH 文件格式的保护后端。它为两个文件共用一个旁路租约，拒绝第二个遵守协议的写入者，在发布前检查两个文件的指纹，只对 Windows 的 `EPERM` / `EBUSY` / `EACCES` rename 错误进行有限退避重试；不会删除目标来强行替换。配置、能力边界和残留锁恢复见[存储保护与维护](docs/storage-safety.md)。
 
@@ -168,6 +185,10 @@ global: { format: 2, tables: { memory, user }, seqHighWater: { memory, user } }
 | `/hermes-memory/pending` | GET / POST | 列出提案；批准或丢弃指定 id |
 | `/hermes-memory/export` | GET | 下载当前条目、完整账簿和独立 v1 文档 |
 | `/hermes-memory/compact` | POST | 按 `before` 与 `maxDetailed` 压缩已结束历史详情，保留防重放标记 |
+
+`ops` 的 `list` 保持 `memory` / `user` 字符串数组，并额外返回同序的 `entryVersions.memory` / `entryVersions.user`。新版官方面板在开始编辑或删除时捕获对应令牌，随 `replace` / `remove` 发送 `expectedVersion`；服务端在写队列内同时核对完整 `oldText` 和行版本。冲突返回 HTTP 409，保留草稿供核对；其他行的修改不会使当前未变化条目的令牌失效。条目改后改回、删后同文重建或插件重载都会使旧令牌失效，无需新增持久化格式。
+
+旧 HTTP 调用不传 `expectedVersion` 时仍保留完整旧文本检查，但没有上述 ABA 保护。该协议不覆盖 agent 工具或待审提案；`patch` / `batch` 也不支持此令牌，携带 `expectedVersion` 会返回 400。令牌捕获示例与完整边界见[面板行版本协议](docs/storage-safety.md#protect-panel-edits-with-row-versions)。
 
 401 要重新通过 DSH 登录入口打开网页；503 表示认证或存储服务不可用。操作失败会保留草稿、最后成功快照及待审提案，不显示虚假的空库或保存成功。
 

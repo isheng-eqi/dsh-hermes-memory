@@ -74,7 +74,7 @@ The model-facing `memory` interface has two required top-level fields: `target` 
 
 When a write fails, the tool returns an error and, where applicable, the current entries and usage so the model can correct the batch. The first three consolidation failures return the original error; from the fourth failure onward, the result includes `done: true` and an instruction to stop retrying. Main-model failure counts are per session and reset each turn; background review uses a separate count for that review. This instruction does not forcibly reject subsequent tool calls. The background loop remains bounded by its 16-request cap and deadline. A successful commit clears the failure count and explicitly instructs the model not to repeat the saved update. DSH controls any further main-model requests after a tool result.
 
-`memory_pending` only allows the model to list proposals. Approval and discard require the authenticated owner to act in the Memory panel. The model cannot approve its own changes, and the background review has no approval tool. Approval revalidates the complete matched entry and its identity; a stale proposal cannot overwrite an entry that changed after the proposal was created.
+`memory_pending` only allows the model to list proposals. Approval and discard require the authenticated owner to act in the Memory panel. The model cannot approve its own changes, and the background review has no approval tool. Approval revalidates the current complete matched entry and sequence identity, rejecting a mismatch in either. Approval does not use the panel row-version protocol described below and cannot detect every past change when the same entry identity changes from A to B and back to A.
 
 ## Configure background review
 
@@ -84,6 +84,21 @@ Edit the `hermes-memory` entry through the DSH configuration UI or configuration
 backgroundReview:
   enabled: false
 ```
+
+**For background review, consider a separate, tested low-cost tool model so an expensive foreground model is not inherited unintentionally.** Set both `provider` and `model` in the same plugin entry:
+
+```yaml
+backgroundReview:
+  enabled: true
+  provider: 'your-configured-provider'
+  model: 'your-tested-tool-model'
+  maxIterations: 4
+  timeoutMs: 120000
+```
+
+These names are placeholders: replace them with provider and model IDs already configured in DSH. The selected model must support the `memory` tool and its nested arguments; first check curation quality and context capacity with synthetic facts. `maxIterations: 4` is an optional tighter request limit that can end a review early. Total cost still depends on the model, context, and actual request count; savings are not guaranteed.
+
+Omitting both `provider` and `model` still inherits the triggering turn's model, parameters, and associated costs. Configure both together. If an explicit review model fails, review reports an error instead of falling back to the foreground model; the foreground session's model is unchanged. The compatible default does not select a provider or send conversations to a new provider on the user's behalf.
 
 Full default configuration example (`enabled: true` enables background review):
 
@@ -145,7 +160,9 @@ A separate `hermes_memory_runtime.json` stores review claims, outcomes, and pend
 
 ### Select storage protection
 
-The default host JSON mode serializes one plugin's writes and rejects duplicate handles in the same backend instance. It does **not** enforce a cross-process lock or detect external edits. The pinned DSH JSON backend attempts rename once and has no Windows transient-error retry. The plugin does not retry a whole KvUnit operation because rejection can occur after publication.
+**Within one plugin instance**, all panel, main-model, and background-review writes share the same `enqueue` queue. Panel `replace` / `remove` also check the complete `oldText`, so an ordinary stale form is rejected after an entry changes from A to B. The panel calls that instance's HTTP routes; it is not a separate file writer. The updated panel also uses [row-version tokens](docs/storage-safety.md#protect-panel-edits-with-row-versions) to reject stale forms after an entry changes back to its original text or is deleted and recreated with identical text.
+
+**Default `host-json` mode can still lose updates when files are shared**: two DSH service/profile processes on the same machine, or separate backend instances, can each cache a snapshot of the same storage directory. The later whole-snapshot write can silently overwrite the earlier update (last writer wins). Manual disk edits during operation can also be overwritten by a later cached write. Duplicate-handle protection within one backend instance does not cover these cases. The pinned DSH JSON backend attempts rename once and has no Windows transient-error retry. The plugin does not retry a whole KvUnit operation because rejection can occur after publication.
 
 Native static installations can opt into a plugin-owned, DSH-format-compatible backend by setting **`storageRoot` to the absolute storage directory**. It acquires one sidecar lease for both files, rejects a second cooperating writer, checks both file fingerprints before publication, and retries only Windows `EPERM` / `EBUSY` / `EACCES` rename failures with bounded backoff. It never deletes the destination to make replacement succeed. See [Storage protection and maintenance](docs/storage-safety.md) for setup, limits, and stale-lock recovery.
 
@@ -168,6 +185,10 @@ The panel API uses DSH owner authentication and Host/Origin checks. Responses di
 | `/hermes-memory/pending` | GET / POST | List proposals, or approve or discard a specific proposal ID |
 | `/hermes-memory/export` | GET | Download current entries, full bookkeeping, and a separate v1 document |
 | `/hermes-memory/compact` | POST | Compact resolved details using `before` and `maxDetailed`, retaining replay markers |
+
+An `ops` `list` response retains the `memory` / `user` string arrays and adds aligned `entryVersions.memory` / `entryVersions.user` arrays. The updated official panel captures the row token when an edit or deletion starts and sends it as `expectedVersion` with `replace` / `remove`. Inside the write queue, the server checks both the complete `oldText` and row version. A conflict returns HTTP 409 and preserves the draft for inspection. Changing a different row does not invalidate an unchanged entry's token. Changing the entry back, deleting and recreating identical text, or reloading the plugin invalidates an old token without adding a persisted format.
+
+Older HTTP calls without `expectedVersion` retain full-old-text checks but lack this ABA protection. The protocol does not cover agent tools or pending approvals. `patch` / `batch` do not support the token and return 400 if `expectedVersion` is supplied. See [Protect panel edits with row versions](docs/storage-safety.md#protect-panel-edits-with-row-versions) for token capture and the full boundary.
 
 For HTTP 401, reopen the page through the DSH login entry. HTTP 503 indicates that authentication or storage services are unavailable. Failed panel operations preserve drafts, the last successful snapshot, and pending proposals instead of displaying an empty store or a false success state.
 

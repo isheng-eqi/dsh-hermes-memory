@@ -990,7 +990,18 @@ async function apply(ctx, config) {
     store.chain = p.catch(() => {})
     return p
   }
-  const entriesOf = (bank) => [...store.tables[bank].values()].sort((a, b) => a.seq - b.seq).map((r) => r.text)
+  const recordsOf = (bank) => [...store.tables[bank].values()].sort((a, b) => a.seq - b.seq)
+  const entriesOf = (bank) => recordsOf(bank).map((r) => r.text)
+  // Optimistic row versions are local to this plugin lifetime, not file locks.
+  // Committed edits replace record objects; delete/recreate and reload also get
+  // new tokens even when text and timestamps happen to match the old row.
+  const rowVersions = new WeakMap()
+  const rowEpoch = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2) + '-' + Math.random().toString(36).slice(2)
+  let rowSequence = 0
+  const versionOf = record => {
+    if (!rowVersions.has(record)) rowVersions.set(record, rowEpoch + ':' + (++rowSequence).toString(36))
+    return rowVersions.get(record)
+  }
   const charCount = (bank) => countChars(renderEntries(entriesOf(bank)))
   const usageLine = (bank) => {
     const current = charCount(bank)
@@ -1225,7 +1236,14 @@ async function apply(ctx, config) {
       }
     }
     const limit = LIMITS[bank]
-    const recs = [...store.tables[bank].values()].sort((a, b) => a.seq - b.seq)
+    const recs = recordsOf(bank)
+    if (options.expectedVersion !== undefined) {
+      const matches = recs.filter(record => record.text === operations[0].oldText)
+      if (matches.length !== 1 || versionOf(matches[0]) !== options.expectedVersion) {
+        return { success: false, target: bank, conflict: true,
+          error: 'The entry changed, was recreated, or the plugin reloaded. Refresh the memory list and start a new edit; your draft was not saved.' }
+      }
+    }
     const working = recs.map((r) => ({ text: r.text, seq: r.seq, createdAt: r.createdAt, updatedAt: r.updatedAt }))
     working.bank = bank
     // 局部序号计数器：失败回滚时不污染全局 seq（#7）
@@ -1782,6 +1800,11 @@ async function apply(ctx, config) {
             json(res, 400, { success: false, error: 'Unknown memory bank' })
             return
           }
+          if (input.expectedVersion !== undefined && (!['replace', 'remove'].includes(input.action)
+            || typeof input.expectedVersion !== 'string' || input.expectedVersion.length === 0 || input.expectedVersion.length > 128)) {
+            json(res, 400, { success: false, error: 'expectedVersion must be a nonempty row version for replace or remove' })
+            return
+          }
           if (['approve', 'discard'].includes(input.action)) {
             const out = await pendingAction(input, { source: 'owner-ui' }); json(res, out.success ? 200 : 422, out); return
           }
@@ -1809,13 +1832,15 @@ async function apply(ctx, config) {
             // The panel sends the full original entry. A stale row must never
             // fall back to a substring match against another entry.
             const exactEntry = op.action === 'replace' || op.action === 'remove'
-            const out = await applyBatch(bank, [op], 'ui', { owner: true, exactEntry })
-            json(res, out.success ? 200 : 422, out)
+            const out = await applyBatch(bank, [op], 'ui', { owner: true, exactEntry, expectedVersion: input.expectedVersion })
+            json(res, out.success ? 200 : out.conflict ? 409 : 422, out)
           } else if (input.action === 'list') {
             json(res, 200, {
               pending: cloneJson(pendingRecords()), pendingCount: pendingCount(), backgroundReview: scheduler.status(),
               memory: ENABLED_BANKS.includes('memory') ? entriesOf('memory').slice(0, 100) : [],
               user: ENABLED_BANKS.includes('user') ? entriesOf('user').slice(0, 100) : [],
+              entryVersions: Object.fromEntries(BANKS.map(name => [name,
+                ENABLED_BANKS.includes(name) ? recordsOf(name).slice(0, 100).map(versionOf) : []])),
               usage: { memory: usageLine('memory'), user: usageLine('user') },
             })
           } else {

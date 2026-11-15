@@ -324,6 +324,93 @@ for (const mode of ['static', 'dynamic']) {
     })
   }
 
+  test(`${mode}: panel and agent share a queue and reject a stale edit after an in-flight model write`, async t => {
+    const writeGate = deferred()
+    const h = await mount(t, mode, { writeGate, snapshot: { global: null, tables: { memory: { original: record('Synthetic original') }, user: {} } } })
+    const before = (await h.request('/hermes-memory/ops')).value
+    const modelWrite = h.call('memory', { action: 'patch', oldText: 'original', content: 'agent update' })
+    await tick()
+    const panelWrite = h.request('/hermes-memory/ops', { body: {
+      action: 'replace', oldText: before.memory[0], content: 'Stale panel draft', expectedVersion: before.entryVersions.memory[0],
+    } })
+    writeGate.resolve()
+    assert.equal((await modelWrite).success, true)
+    const rejected = await panelWrite
+    assert.equal(rejected.status, 409)
+    assert.equal(rejected.value.conflict, true)
+    assert.deepEqual((await h.call('memory_list')).memory, ['Synthetic agent update'])
+    const results = await Promise.all([
+      h.call('memory', { action: 'add', content: 'Agent sibling' }),
+      h.request('/hermes-memory/ops', { body: { action: 'add', content: 'Panel sibling' } }),
+    ])
+    assert.equal(results[0].success, true)
+    assert.equal(results[1].status, 200)
+    assert.equal((await h.call('memory_list')).memory.length, 3)
+  })
+
+  test(`${mode}: panel versions reject change-and-restore, delete-and-recreate, and reload without invalidating other rows`, async t => {
+    const h = await mount(t, mode)
+    const post = body => h.request('/hermes-memory/ops', { body })
+    await h.call('memory', { action: 'add', content: 'Synthetic original' })
+    const original = (await post({ action: 'list' })).value
+    const token = original.entryVersions.memory[0]
+    assert.equal((await post({ action: 'list' })).value.entryVersions.memory[0], token)
+    await h.call('memory', { action: 'add', content: 'Unrelated sibling' })
+    assert.equal((await post({ action: 'list' })).value.entryVersions.memory[0], token)
+    const patch = (oldText, content) => h.call('memory', { action: 'patch', oldText, content })
+    await patch('Synthetic original', 'Synthetic changed')
+    await patch('Synthetic changed', 'Synthetic original')
+    assert.equal((await post({ action: 'replace', oldText: original.memory[0], content: 'Stale draft', expectedVersion: token })).status, 409)
+    const restoredToken = (await post({ action: 'list' })).value.entryVersions.memory[0]
+    assert.notEqual(restoredToken, token)
+    await h.call('memory', { action: 'remove', oldText: 'Synthetic original' })
+    await h.call('memory', { action: 'add', content: 'Synthetic original' })
+    assert.equal((await post({ action: 'remove', oldText: 'Synthetic original', expectedVersion: restoredToken })).status, 409)
+    const rows = (await post({ action: 'list' })).value
+    const index = rows.memory.indexOf('Synthetic original')
+    const fresh = rows.entryVersions.memory[index]
+    for (const expectedVersion of ['', 7, null, 'x'.repeat(129)]) {
+      assert.equal((await post({ action: 'remove', oldText: 'Synthetic original', expectedVersion })).status, 400)
+    }
+    assert.equal((await post({ action: 'patch', oldText: 'Synthetic', content: 'Changed', expectedVersion: fresh })).status, 400)
+    assert.equal((await post({ action: 'batch', operations: [{ action: 'remove', oldText: 'Synthetic original' }], expectedVersion: fresh })).status, 400)
+    const before = h.counters().writes
+    assert.equal((await post({ action: 'replace', oldText: 'Synthetic original', content: 'Fresh update', expectedVersion: fresh })).status, 200)
+    assert.equal(h.counters().writes, before + 1)
+    const updated = (await post({ action: 'list' })).value
+    const updatedToken = updated.entryVersions.memory[updated.memory.indexOf('Fresh update')]
+    const reloaded = await mount(t, mode, { snapshot: h.snapshot(), runtime: h.runtime().global })
+    assert.equal((await reloaded.request('/hermes-memory/ops', { body: { action: 'remove', oldText: 'Fresh update', expectedVersion: updatedToken } })).status, 409)
+    const current = (await reloaded.request('/hermes-memory/ops')).value
+    const currentToken = current.entryVersions.memory[current.memory.indexOf('Fresh update')]
+    assert.equal((await reloaded.request('/hermes-memory/ops', { body: { action: 'remove', oldText: 'Fresh update', expectedVersion: currentToken } })).status, 200)
+    assert.deepEqual((await reloaded.call('memory_list')).memory, ['Unrelated sibling'])
+  })
+
+  test(`${mode}: panel versions survive failed or no-op changes and reject ambiguous identical rows`, async t => {
+    const h = await mount(t, mode)
+    const post = body => h.request('/hermes-memory/ops', { body })
+    await h.call('memory', { action: 'add', content: 'Synthetic original' })
+    const first = (await post({ action: 'list' })).value.entryVersions.memory[0]
+    assert.equal((await h.call('memory', { action: 'add', content: 'Synthetic original' })).success, true)
+    assert.equal((await h.call('memory', { action: 'patch', oldText: 'missing', content: 'invalid update' })).success, false)
+    assert.equal((await post({ action: 'list' })).value.entryVersions.memory[0], first)
+    await h.call('memory', { action: 'add', content: 'Synthetic sibling' })
+    await h.call('memory', { action: 'patch', oldText: 'Synthetic sibling', content: 'Synthetic original' })
+    const duplicates = (await post({ action: 'list' })).value
+    for (const expectedVersion of duplicates.entryVersions.memory) {
+      assert.equal((await post({ action: 'remove', oldText: 'Synthetic original', expectedVersion })).status, 409)
+    }
+    assert.deepEqual((await h.call('memory_list')).memory, ['Synthetic original', 'Synthetic original'])
+    // The dynamic install has fixed defaults and does not accept static config.
+    if (mode === 'static') {
+      const hidden = await mount(t, mode, { snapshot: h.snapshot(), config: { memoryEnabled: false } })
+      const list = (await hidden.request('/hermes-memory/ops')).value
+      assert.deepEqual(list.memory, [])
+      assert.deepEqual(list.entryVersions.memory, [])
+    }
+  })
+
   test(`${mode}: duplicate sequence identity fails closed without changing the medium`, async t => {
     const h = await mount(t, mode, { snapshot: { global: null, tables: { memory: { a: record('alpha'), b: record('beta') }, user: {} } } })
     const before = h.snapshot()
@@ -746,6 +833,33 @@ test('static: staged add-then-patch pins remain approvable after reload without 
   const approved = await restored.request('/hermes-memory/pending', { body: { action: 'approve', id: staged.pendingId } })
   assert.equal(approved.value.success, true)
   assert.deepEqual((await restored.call('memory_list')).memory, ['Synthetic final'])
+})
+
+test('static: review model selection is explicit, inherits only when omitted, and never falls back on override failure', async t => {
+  for (const config of [{ provider: 'review-only' }, { model: 'curator-only' }]) {
+    await assert.rejects(mount(t, 'static', { config: { backgroundReview: config } }), /provider and model must be configured together/)
+  }
+  const inherited = scriptedLlm(['Nothing to save.'])
+  const h = await mount(t, 'static', { llm: inherited, config: { backgroundReview: { interval: 1 } } })
+  const parent = { provider: 'foreground', model: 'large-model', maxTokens: 8192, reasoningEffort: 'high' }
+  h.session.requestHeader = () => ({ config: parent })
+  await completeTurn(h, 1)
+  assert.equal(inherited.requests[0].provider, parent.provider)
+  assert.equal(inherited.requests[0].model, parent.model)
+  assert.equal(inherited.requests[0].maxTokens, parent.maxTokens)
+  const attempts = []
+  const selected = await mount(t, 'static', { llm: { async prepareCall(config) {
+    attempts.push(clone(config))
+    throw new Error('Synthetic review route unavailable')
+  } }, config: { backgroundReview: { interval: 1, provider: 'curation-provider', model: 'small-tool-model', maxIterations: 4 } } })
+  selected.session.requestHeader = () => ({ config: parent })
+  await completeTurn(selected, 1)
+  assert.equal(attempts.length, 1)
+  assert.equal(attempts[0].provider, 'curation-provider')
+  assert.equal(attempts[0].model, 'small-tool-model')
+  assert.equal(attempts[0].maxTokens, undefined)
+  assert.deepEqual(parent, { provider: 'foreground', model: 'large-model', maxTokens: 8192, reasoningEffort: 'high' })
+  assert.match(selected.runtime().global.reviews['session:session-test'].error, /review route unavailable/)
 })
 
 test('static: route override discards route-specific controls, same route retains them, and flush precedes model billing', async t => {

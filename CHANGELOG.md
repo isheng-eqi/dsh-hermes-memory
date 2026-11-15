@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add row-version preconditions to the updated official panel's direct `replace` / `remove` calls, rejecting change-back, identical-text recreation, and pre-reload stale forms with HTTP 409 while retaining drafts. Preserve legacy string lists and unversioned HTTP behavior without a new persisted format; agent tools, approvals, and `patch` / `batch` are outside this protocol.
+- Clarify that same-instance panel/model/background writes already share one queue and full-old-text panel checks. Name the default host-JSON lost-update hazard for separate processes or backend instances sharing cached files, and distinguish it from opt-in native storage protection. Add a configuration example for selecting a tested low-cost review model and complete reusable introductions that disclose default additional requests, opt-out, and model overrides. Thanks to [Devio (@D0xedDevi0)](https://github.com/D0xedDevi0) for testing and feedback.
+
 - Address [#16](https://github.com/isheng-eqi/dsh-hermes-memory/issues/16): require main-unit ownership before runtime recovery, persist entry sequence high-water marks, and add opt-in native `storageRoot` protection with a shared lease, external-change checks, and bounded Windows rename retries. Keep default host-JSON limits explicit.
 - Add owner-only export and history-detail compaction in the Memory panel and an offline backup/compaction/v1-extraction command. Keep replay claims, proposal identities/hashes, and complete unresolved approval evidence; no total metadata cap or automatic downgrade is claimed. Thanks to [BrierAinz](https://github.com/BrierAinz) for the persistence feedback.
 

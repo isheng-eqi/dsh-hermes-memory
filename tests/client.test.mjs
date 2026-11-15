@@ -349,6 +349,59 @@ test('static: a stale delete keeps its confirmation and error without changing t
   assert.equal(section(h.render()).deleting, null)
 })
 
+test('static: row versions stay attached to the original draft and delete confirmation across refreshes', async () => {
+  for (const action of ['replace', 'remove']) {
+    let version = 'epoch:first'
+    const h = fixture(async (_path, init) => JSON.parse(init.body).action === 'list'
+      ? response({ ...list(), entryVersions: { memory: [version], user: [] } })
+      : response({ error: 'The entry changed or was recreated. Refresh the memory list.' }, 409))
+    h.show()
+    await tick()
+    if (action === 'replace') section(h.render()).onEdit({ bank: 'memory', index: 0, original: 'synthetic entry', text: 'retained draft' })
+    else section(h.render()).onRemove('memory', 'synthetic entry')
+    version = 'epoch:replacement'
+    button(h.render(), '刷新').props.onClick()
+    await tick()
+    if (action === 'replace') {
+      assert.match(text(sectionView(h.render())), /原条目已变化或被删除/)
+      section(h.render()).onEdit({ ...section(h.render()).editing, text: 'retained edited draft' })
+      section(h.render()).onSave()
+    } else section(h.render()).onConfirmRemove()
+    await tick()
+    const writes = h.calls.map(([, init]) => JSON.parse(init.body)).filter(body => body.action === action)
+    assert.equal(writes.length, 1)
+    assert.equal(writes[0].expectedVersion, 'epoch:first')
+    const props = section(h.render())
+    assert.match(text(sectionView(h.render())), /entry changed or was recreated/)
+    if (action === 'replace') {
+      assert.equal(props.editing.text, 'retained edited draft')
+      props.onCancel()
+      section(h.render()).onEdit({ bank: 'memory', index: 0, original: 'synthetic entry', text: 'fresh draft' })
+      section(h.render()).onSave()
+    } else {
+      assert.equal(props.deleting.text, 'synthetic entry')
+      props.onCancelRemove()
+      section(h.render()).onRemove('memory', 'synthetic entry')
+      section(h.render()).onConfirmRemove()
+    }
+    await tick()
+    const retried = h.calls.map(([, init]) => JSON.parse(init.body)).filter(body => body.action === action)
+    assert.equal(retried[1].expectedVersion, 'epoch:replacement')
+    h.dispose()
+  }
+})
+
+test('static: invalid or mismatched row versions are rejected without showing an editable list', async () => {
+  for (const entryVersions of [null, [], { memory: [], user: [] }, { memory: [null], user: [] }, { memory: [''], user: [] }]) {
+    const h = fixture(async () => response({ ...list(), entryVersions }))
+    h.show()
+    await tick()
+    assert.match(text(h.render()), /无效记忆版本/)
+    assert.equal(walk(h.render(), node => typeof node.type === 'function' && node.props.bank).length, 0)
+    h.dispose()
+  }
+})
+
 test('static: a retained Enter/click handler cannot duplicate an in-flight mutation', async () => {
   const write = deferred()
   const h = fixture(async (_path, init) => JSON.parse(init.body).action === 'list' ? response(list()) : write.promise)
