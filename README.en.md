@@ -16,7 +16,7 @@ The implementation is based on Hermes commit `c0c4357744d1a6994d332b826aea4c77fc
 
 ## Install and use
 
-Install or enable the bundle in the DSH plugin manager, refresh the existing DSH page, and click **Memory** at the bottom of the sidebar. A source installation uses the package directory. For the published package:
+Install or enable the bundle in the DSH plugin manager, refresh the existing DSH page, and click **记忆** (Memory) at the bottom of the sidebar. A source installation uses the package directory. For the published package:
 
 ```sh
 dsh plugin --profile web add dsh-hermes-memory
@@ -30,7 +30,7 @@ The implementation verification record covers DSH `0.2.2-alpha.2`, Node `24.22.2
 
 1. State a durable fact during a normal conversation, such as “Use Chinese for all future conversations.” A one-off task requirement does not automatically become a lasting preference.
 2. The main model can save memory at any time. By default, background review also runs when the genuine user-turn count reaches a multiple of 10 and that turn completes normally. Tool calls and automatic continuation messages do not advance the user-turn count.
-3. Refresh the Memory panel to inspect background status, both banks, and pending changes. Background additions can be saved directly; changes to existing entries and deletions require approval.
+3. Refresh the Memory panel to inspect background status, both banks, and pending changes. By default, background additions can be saved directly (when `writeApproval: true` is enabled, background additions are also staged as pending proposals); changes to existing entries and deletions always require approval.
 4. The current session retains the frozen snapshot captured on its first read. New sessions receive updated memory. Use `memory_list` to read the current store during an existing session.
 
 A turn counts at most one genuine user message. A review also requires a genuine user message in the triggering turn, successful turn completion, and a nonempty final text response without tool calls. Cancelled or failed turns, empty responses, and responses with unfinished tool calls do not trigger review; any genuine user message already received in those turns still counts toward the interval. Ordinary subagents do not trigger automatic review. Only one review runs per session at a time; later triggers encountered while it is running are skipped rather than queued for replay.
@@ -170,7 +170,7 @@ Stop every existing writer and back up both files before switching. `storageRoot
 
 ### Compact history and export a downgrade copy
 
-The Memory panel provides **Export backup** and **Compact history details**. Export separates current bank entries, complete storage bookkeeping, and a derived v1 JSON document containing the current entries. It includes disabled banks for the authenticated owner and never installs a downgrade. The [offline maintenance command](docs/storage-safety.md#offline-maintenance-and-downgrade) can also export, compact after making a new backup, or extract the v1 document.
+The Memory panel (`记忆`) provides **导出备份** (Export backup) and **压缩历史详情** (Compact history details). Export separates current bank entries, complete storage bookkeeping, and a derived v1 JSON document containing the current entries. It includes disabled banks for the authenticated owner and never installs a downgrade. The [offline maintenance command](docs/storage-safety.md#offline-maintenance-and-downgrade) can also export, compact after making a new backup, or extract the v1 document.
 
 Compaction drops old resolved proposal/review payloads while preserving identities, SHA-256 audit hashes, statuses, and per-session claimed-turn high-water marks. Pending, applying, and interrupted approvals retain their full evidence. The panel uses a 30-day cutoff and keeps the newest 100 detailed resolved rows in each collection. Newer rows and unresolved records are also retained. API/CLI callers can select the cutoff and detailed-history allowance.
 
@@ -237,7 +237,7 @@ Run these development tools from a source checkout of this repository; they are 
 - [Synthetic memory quality scorer](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/eval/memory-quality/README.md): scores existing outputs; scorer regression success does not establish model quality.
 - [Synthetic resource characterization](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/docs/resource-characterization.md): observes scheduler, review, storage calls and disposal. Its two-million UTF-16-unit cap covers cumulative user evidence across phases, not complete requests or production resource limits.
 
-The main-chat guidance contains 964 Unicode code points. The memory tool description and parameters add approximately 51 characters compared with the previous version. The background-specific review prompt contains 1477 code points and is sent only in review requests. These are character counts; actual token usage and cost depend on the model tokenizer, conversation length, and request count.
+The main-chat guidance contains 964 Unicode code points. The memory tool description and parameters add approximately 51 characters compared with the previous version. The background-specific review prompt contains 1477 code points and is sent only in review requests; each review request system prompt combines the main-chat guidance, the background review prompt, framing text, and the current enabled memory banks (2542 code points with empty banks). In normal operation, a background review makes 1 model request when nothing is worth saving or 2 requests when applying a single-bank update; 16 is the retry/loop ceiling. These are character counts; actual token usage and cost depend on the model tokenizer, conversation length, and request count.
 
 ## License
 

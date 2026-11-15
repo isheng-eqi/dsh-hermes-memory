@@ -1479,14 +1479,24 @@ async function apply(ctx, config) {
     },
     async (args, _exec) => {
       await ensureReady()
-      const query = str(args.query).trim().toLowerCase()
+      await store.chain
+      const fold = text => normalizeForMatch(String(text).normalize('NFKC')).toLowerCase()
+      const query = fold(args.query)
+      const tokens = []
+      for (const word of query.split(/\s+/).filter(w => w.length > 0)) {
+        tokens.push(word)
+        for (const run of word.match(/[\p{Script=Han}]{2,}/gu) || []) {
+          for (let i = 0; i < run.length - 1; i++) tokens.push(run.slice(i, i + 2))
+        }
+      }
+      const uniqueTokens = [...new Set(tokens)]
       const banks = args.target === 'memory' || args.target === 'user' ? ENABLED_BANKS.filter(bank => bank === args.target) : ENABLED_BANKS
       const results = []
       for (const bank of banks) {
         for (const entry of entriesOf(bank)) {
-          const hay = entry.toLowerCase()
+          const hay = fold(entry)
           let score = 0
-          for (const tok of query.split(/\s+/).filter((w) => w.length > 0)) if (hay.includes(tok)) score += tok.length >= 4 ? 2 : 1
+          for (const tok of uniqueTokens) if (hay.includes(tok)) score += [...tok].length >= 4 || /[\p{Script=Han}]{2}/u.test(tok) ? 2 : 1
           if (score > 0) results.push({ bank, text: entry, score })
         }
       }
