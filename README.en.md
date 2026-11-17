@@ -26,6 +26,10 @@ The plugin requires `tools`, `timer`, `sessionProjections`, and a JSON storage b
 
 The implementation verification record covers DSH `0.2.2-alpha.2`, Node `24.22.2`, and the current v4 session format. The package's peer dependency ranges do not guarantee runtime compatibility with every matching version.
 
+![Memory panel showing synthetic offline entries, storage status, and row actions](docs/panel.png)
+
+The panel currently uses Simplified Chinese; this English README explains its controls. A complete interface translation is welcome as a separate contribution. The panel supports Escape to close, trapped Tab navigation, focus restoration to its opener, and entry-specific accessible action names.
+
 ### Observe automatic memory
 
 1. State a durable fact during a normal conversation, such as “Use Chinese for all future conversations.” A one-off task requirement does not automatically become a lasting preference.
@@ -186,11 +190,11 @@ The panel API uses DSH owner authentication and Host/Origin checks. Responses di
 | `/hermes-memory/export` | GET | Download current entries, full bookkeeping, and a separate v1 document |
 | `/hermes-memory/compact` | POST | Compact resolved details using `before` and `maxDetailed`, retaining replay markers |
 
-An `ops` `list` response retains the `memory` / `user` string arrays and adds aligned `entryVersions.memory` / `entryVersions.user` arrays. The updated official panel captures the row token when an edit or deletion starts and sends it as `expectedVersion` with `replace` / `remove`. Inside the write queue, the server checks both the complete `oldText` and row version. A conflict returns HTTP 409 and preserves the draft for inspection. Changing a different row does not invalidate an unchanged entry's token. Changing the entry back, deleting and recreating identical text, or reloading the plugin invalidates an old token without adding a persisted format.
+An `ops` `list` response retains the `memory` / `user` string arrays and adds aligned `entryVersions.memory` / `entryVersions.user` arrays. The updated official panel captures the row token when an edit or deletion starts and sends it as `expectedVersion` with `replace` / `remove`. Inside the write queue, the server checks both the complete `oldText` and row version. Even identical-text records can be selected independently through their distinct tokens. A conflict returns HTTP 409 with `code: "row_conflict"`, retains the local draft for inspection or copying, and prevents repeated submission of the stale version. Refresh to inspect the latest list, then cancel and start a new edit or deletion. An ordinary refresh does not attach a fresh token to an old draft. Changing a different row does not invalidate an unchanged entry's token. Changing the entry back, deleting and recreating identical text, or reloading the plugin invalidates an old token without adding a persisted format.
 
 Older HTTP calls without `expectedVersion` retain full-old-text checks but lack this ABA protection. The protocol does not cover agent tools or pending approvals. `patch` / `batch` do not support the token and return 400 if `expectedVersion` is supplied. See [Protect panel edits with row versions](docs/storage-safety.md#protect-panel-edits-with-row-versions) for token capture and the full boundary.
 
-For HTTP 401, reopen the page through the DSH login entry. HTTP 503 indicates that authentication or storage services are unavailable. Failed panel operations preserve drafts, the last successful snapshot, and pending proposals instead of displaying an empty store or a false success state.
+The panel keeps `storageSafety` visible. For HTTP 401 / 403, reopen through the DSH login entry. Unknown storage or runtime outcomes (`storage_reload_required` / `runtime_reload_required`) stop writes and require reloading the plugin and inspecting storage; repeated list retries cannot recover them. Retry remains available for retryable service unavailability. Error responses also carry a stable `code` and current storage status. Failed operations preserve the local draft, last successful snapshot, and pending proposals; a retained local draft has not been saved to storage. See [Respond to panel errors](docs/storage-safety.md#respond-to-panel-errors).
 
 ## Scope of the adaptation
 
@@ -212,7 +216,7 @@ The [2.0.0 implementation and verification record](docs/2026-11-11_hermes-memory
 
 ## Develop and verify
 
-The source separates pure rules, prompts, the background model loop, scheduling, and host integration. `host.js` is generated from those modules; do not maintain a second implementation by hand.
+The source separates pure rules, prompts, the background model loop, scheduling, and host integration. `host.js` is generated from those modules; do not maintain a second implementation by hand. Read the [contribution guide](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/CONTRIBUTING.md) before contributing; agents should also read the [agent guidance](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/AGENTS.md).
 
 ```sh
 npm run build:host

@@ -86,5 +86,14 @@ for (const mode of ['static', 'dynamic']) {
 
     const limited = await h.call('memory_search', { query: 'note', limit: 1 })
     assert.equal(limited.count, 1)
+
+    await h.call('memory', { target: 'user', operations: [
+      { action: 'add', content: '𠀀𠀂' },
+      { action: 'add', content: '𠐁一' },
+    ] })
+    const supplementaryFalsePositive = await h.call('memory_search', { query: '𠀀𠀁' })
+    assert.equal(supplementaryFalsePositive.count, 0)
+    const surrogateBoundaryFalsePositive = await h.call('memory_search', { query: '𠀀𠀁一' })
+    assert.equal(surrogateBoundaryFalsePositive.count, 0)
   })
 }

@@ -24,7 +24,7 @@
 1. 使用符合 `package.json` 的 Node.js（`^22.19 || >=24`）；在独立工作副本运行 `npm ci`。
 2. 添加能证明问题的回归测试，优先复用 `tests/host-fixture.mjs` 的合成夹具与临时目录。
 3. 需要时重新生成 `host.js`，然后运行 `npm test` 和 `git diff --check`。
-4. 有构建完成的 DSH 副本时，可设置 `DSH_CLIENT_TEST_CHECKOUT` 运行真实宿主集成测试。否则明确列出跳过项，不声称完成了宿主验证。
+4. 有构建完成的 DSH 副本时，可设置 `DSH_CLIENT_TEST_CHECKOUT` 运行真实宿主集成测试。合并或发布前使用 `scripts/testing/host-baseline.json` 指定、跟踪源码干净且已完整构建的副本运行 `node scripts/testing/host-release-check.mjs`，要求全部通过且零跳过、取消和 todo；普通 `npm test` 不替代严格检查。缺少该副本时明确列出缺口，不声称完成了宿主验证。
 5. 常规检查不要运行 `scripts/live-review-smoke.mjs` 或访问真实用户配置。真实模型调用和用户数据操作需要明确授权，并应使用隔离环境与合成输入。
 6. 用户可见行为变更同步中英文 README、相关 locale 文案及必要的变更日志。引用当前代码和测试，区分已实现行为、建议与未验证假设。
 

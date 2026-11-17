@@ -30,7 +30,13 @@ git diff --check
 DSH_CLIENT_TEST_CHECKOUT=/absolute/path/to/built/dsh npm test
 ```
 
-报告通过、失败和跳过的数量，以及 Node/DSH 版本或提交。没有该宿主时，明确说明缺口，不把跳过当作兼容性已验证。发布包内容变更可用 `npm pack --dry-run --ignore-scripts` 检查；该命令不替代构建或测试。常规验证不需要运行 `scripts/live-review-smoke.mjs`：它可读取配置并调用真实模型；只有明确授权后才使用隔离配置进行这类验证。
+准备合并或发布时，使用[固定宿主基线](scripts/testing/host-baseline.json)中指定、跟踪源码干净且已完整构建的 DSH 副本运行严格检查：
+
+```sh
+DSH_CLIENT_TEST_CHECKOUT=/absolute/path/to/built/pinned/dsh node scripts/testing/host-release-check.mjs
+```
+
+严格入口要求所有测试通过且零跳过、取消和 todo；普通 `npm test` 不替代它。报告通过、失败和跳过的数量，以及 Node/DSH 版本或提交。没有该宿主时，明确说明缺口，不把跳过当作兼容性已验证。发布包内容变更可用 `npm pack --dry-run --ignore-scripts` 检查；该命令不替代构建或测试。常规验证不需要运行 `scripts/live-review-smoke.mjs`：它可读取配置并调用真实模型；只有明确授权后才使用隔离配置进行这类验证。
 
 ## 代码与文档
 
@@ -83,7 +89,13 @@ Some real-host integration tests skip by default. With an existing built DSH sou
 DSH_CLIENT_TEST_CHECKOUT=/absolute/path/to/built/dsh npm test
 ```
 
-Report passed, failed and skipped counts and Node/DSH versions or commits. If the host is unavailable, state that gap; skipped tests do not prove compatibility. Package-content changes can be inspected with `npm pack --dry-run --ignore-scripts`; this does not replace builds or tests. Routine verification does not require `scripts/live-review-smoke.mjs`: it can read configuration and call a real model. Use isolated configuration for such verification only with explicit authorization.
+Before integration or release, use the exact [pinned host baseline](scripts/testing/host-baseline.json), with clean tracked sources and a complete build, for the strict check:
+
+```sh
+DSH_CLIENT_TEST_CHECKOUT=/absolute/path/to/built/pinned/dsh node scripts/testing/host-release-check.mjs
+```
+
+The strict entry requires all tests to pass with zero skips, cancellations, or todos; ordinary `npm test` does not replace it. Report passed, failed and skipped counts and Node/DSH versions or commits. If the host is unavailable, state that gap; skipped tests do not prove compatibility. Package-content changes can be inspected with `npm pack --dry-run --ignore-scripts`; this does not replace builds or tests. Routine verification does not require `scripts/live-review-smoke.mjs`: it can read configuration and call a real model. Use isolated configuration for such verification only with explicit authorization.
 
 ## Code and documentation
 

@@ -26,6 +26,10 @@ dsh plugin --profile web add dsh-hermes-memory
 
 已在 DSH `0.2.2-alpha.2`、Node `24.22.2` 的当前 v4 会话格式验证。包的 peer 范围不是运行兼容性保证。
 
+![记忆面板，使用离线合成条目展示双库、存储状态和操作按钮](docs/panel.png)
+
+面板目前使用简体中文；英文 README 介绍使用方式，完整界面翻译欢迎另行贡献。面板支持 Esc 关闭、Tab 焦点循环与关闭后返回入口，条目按钮有各自的无障碍名称。
+
 ### 观察自动记忆
 
 1. 在正常对话中明确表达长期事实，例如「以后都用中文与我交流」。一次性的任务要求不会自动变成长期偏好。
@@ -186,11 +190,11 @@ global: { format: 2, tables: { memory, user }, seqHighWater: { memory, user } }
 | `/hermes-memory/export` | GET | 下载当前条目、完整账簿和独立 v1 文档 |
 | `/hermes-memory/compact` | POST | 按 `before` 与 `maxDetailed` 压缩已结束历史详情，保留防重放标记 |
 
-`ops` 的 `list` 保持 `memory` / `user` 字符串数组，并额外返回同序的 `entryVersions.memory` / `entryVersions.user`。新版官方面板在开始编辑或删除时捕获对应令牌，随 `replace` / `remove` 发送 `expectedVersion`；服务端在写队列内同时核对完整 `oldText` 和行版本。冲突返回 HTTP 409，保留草稿供核对；其他行的修改不会使当前未变化条目的令牌失效。条目改后改回、删后同文重建或插件重载都会使旧令牌失效，无需新增持久化格式。
+`ops` 的 `list` 保持 `memory` / `user` 字符串数组，并额外返回同序的 `entryVersions.memory` / `entryVersions.user`。新版官方面板在开始编辑或删除时捕获对应令牌，随 `replace` / `remove` 发送 `expectedVersion`；服务端在写队列内同时核对完整 `oldText` 和行版本。即使两条记录文字完全相同，也会用各自的令牌定位选中的那一条。冲突返回 HTTP 409 和 `code: "row_conflict"`，保留本地草稿供复制或核对，并停止重复提交过期版本；刷新查看最新列表，取消后重新开始编辑或删除。普通刷新不会自动给旧草稿换新令牌。其他行的修改不会使当前未变化条目的令牌失效。条目改后改回、删后同文重建或插件重载都会使旧令牌失效，无需新增持久化格式。
 
 旧 HTTP 调用不传 `expectedVersion` 时仍保留完整旧文本检查，但没有上述 ABA 保护。该协议不覆盖 agent 工具或待审提案；`patch` / `batch` 也不支持此令牌，携带 `expectedVersion` 会返回 400。令牌捕获示例与完整边界见[面板行版本协议](docs/storage-safety.md#protect-panel-edits-with-row-versions)。
 
-401 要重新通过 DSH 登录入口打开网页；503 表示认证或存储服务不可用。操作失败会保留草稿、最后成功快照及待审提案，不显示虚假的空库或保存成功。
+面板持续显示 `storageSafety` 存储状态。401 / 403 会提示从 DSH 登录入口重新打开；存储或运行时结果不明（`storage_reload_required` / `runtime_reload_required`）会停止写入并提示重载插件、核对存储，不能靠重复「载入」恢复。确实可重试的服务暂不可用仍提供重试；错误响应也带稳定 `code` 和当前存储状态。操作失败会保留本地草稿、最后成功快照及待审提案；本地草稿保留不代表已经写入存储。恢复边界见[存储保护与维护](docs/storage-safety.md#respond-to-panel-errors)。
 
 ## 对照范围
 
@@ -212,7 +216,7 @@ global: { format: 2, tables: { memory, user }, seqHighWater: { memory, user } }
 
 ## 开发与验证
 
-源码分为纯规则、提示词、后台模型循环、调度与宿主集成。`host.js` 由这些模块生成，禁止手工维护另一份实现。
+源码分为纯规则、提示词、后台模型循环、调度与宿主集成。`host.js` 由这些模块生成，禁止手工维护另一份实现。参与开发请先读[贡献指南](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/CONTRIBUTING.md)，代理另读[代理贡献指引](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/AGENTS.md)。
 
 ```sh
 npm run build:host

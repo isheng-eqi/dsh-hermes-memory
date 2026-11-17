@@ -32,6 +32,7 @@ async function mount(t, mode, options = {}) {
           async setGlobal(global) { if (options.runtimeFailure) throw options.runtimeFailure; runtimeSaved.global = clone(global) },
           async close() {},
         }
+        if (options.openFailure) throw options.openFailure
         if (active) throw new Error('unit already open')
         active = true
         await options.openGate?.promise
@@ -262,6 +263,119 @@ for (const mode of ['static', 'dynamic']) {
     assert.equal((await h.request('/hermes-memory/ops')).status, 503)
   })
 
+  test(`${mode}: panel API returns stable codes and storage safety on success and business errors`, async t => {
+    const h = await mount(t, mode)
+    const list = await h.request('/hermes-memory/ops')
+    assert.equal(list.status, 200)
+    assert.equal(list.value.code, 'ok')
+    assert.deepEqual(list.value.storageSafety, { mode: 'host-json', crossProcessLock: false, externalChangeCheck: false, renameRetry: 'host-dependent', state: 'open', code: 'ok', error: null })
+    const stats = await h.request('/hermes-memory/stats')
+    assert.equal(stats.value.ready, true)
+    assert.deepEqual(stats.value.storageSafety, list.value.storageSafety)
+    assert.deepEqual((await h.call('memory_stats')).storageSafety, list.value.storageSafety)
+    for (const body of ['{', { action: 'add', content: {} }, { action: 'remove', oldText: 'missing' }]) {
+      const invalid = await h.request('/hermes-memory/ops', { body })
+      assert.ok(invalid.status >= 400 && invalid.status < 500)
+      assert.equal(invalid.value.code, 'validation_failed')
+      assert.equal(invalid.value.storageSafety.state, 'open')
+    }
+    const invalidPending = await h.request('/hermes-memory/pending', { body: '{' })
+    assert.equal(invalidPending.status, 400)
+    assert.equal(invalidPending.value.code, 'validation_failed')
+    assert.equal(invalidPending.value.storageSafety.state, 'open')
+    const unauthorized = await h.request('/hermes-memory/ops', { auth: false })
+    assert.equal(unauthorized.value.code, 'unauthorized')
+    assert.equal(unauthorized.value.storageSafety, undefined)
+    assert.equal((await h.request('/hermes-memory/ops', { origin: 'https://foreign.invalid' })).value.code, 'forbidden')
+    delete h.services.connection
+    assert.equal((await h.request('/hermes-memory/ops')).value.code, 'auth_service_unavailable')
+  })
+
+  test(`${mode}: first failed memory publication and later requests expose plugin quarantine`, async t => {
+    const h = await mount(t, mode, { commitThenThrow: true })
+    const failed = await h.request('/hermes-memory/ops', { body: { action: 'add', content: 'Committed before failure' } })
+    assert.equal(failed.status, 500)
+    assert.equal(failed.value.code, 'storage_reload_required')
+    assert.equal(failed.value.storageSafety.mode, 'host-json')
+    assert.equal(failed.value.storageSafety.state, 'poisoned')
+    assert.equal(failed.value.storageSafety.code, 'storage_reload_required')
+    assert.equal(failed.value.storageSafety.errorCode, 'EIO')
+    for (const path of ['/hermes-memory/ops', '/hermes-memory/stats']) {
+      const later = await h.request(path)
+      assert.ok(later.status >= 500)
+      assert.equal(later.value.code, 'storage_reload_required')
+      assert.equal(later.value.storageSafety.state, 'poisoned')
+      assert.equal(later.value.memory, undefined)
+    }
+    const stats = await h.call('memory_stats')
+    assert.equal(stats.ready, false)
+    assert.equal(stats.code, 'storage_reload_required')
+    assert.equal(stats.storageSafety.state, 'poisoned')
+    assert.equal(h.counters().writes, 1)
+  })
+
+  test(`${mode}: transient initialization and missing service stay unavailable and recover without quarantine`, async t => {
+    const options = { openFailure: Object.assign(new Error('Synthetic temporary open failure'), { code: 'EAGAIN' }) }
+    const h = await mount(t, mode, options)
+    const failed = await h.request('/hermes-memory/ops')
+    assert.equal(failed.value.code, 'storage_unavailable')
+    assert.equal(failed.value.storageSafety.state, 'unavailable')
+    assert.equal(failed.value.storageSafety.errorCode, 'EAGAIN')
+    options.openFailure = null
+    assert.equal((await h.request('/hermes-memory/ops')).value.storageSafety.state, 'open')
+    delete h.services.storage
+    const missing = await h.request('/hermes-memory/ops')
+    assert.equal(missing.value.code, 'storage_unavailable')
+    assert.equal(missing.value.storageSafety.state, 'unavailable')
+    assert.equal(missing.value.memory, undefined)
+    h.services.storage = { backend: { get: () => h.backend } }
+    assert.equal((await h.request('/hermes-memory/ops')).status, 200)
+    let state = 'unavailable'
+    h.backend.status = () => ({ state })
+    assert.equal((await h.request('/hermes-memory/ops')).value.code, 'storage_unavailable')
+    state = 'open'
+    const recovered = await h.request('/hermes-memory/ops')
+    assert.equal(recovered.status, 200)
+    assert.equal(recovered.value.storageSafety.state, 'open')
+    assert.equal(recovered.value.storageSafety.error, null)
+  })
+
+  test(`${mode}: backend poison and closing block cached panel rows and auth hides private health`, async t => {
+    const h = await mount(t, mode)
+    assert.equal((await h.request('/hermes-memory/ops')).status, 200)
+    let state = 'poisoned'
+    h.backend.status = () => ({ state, root: 'PRIVATE-SYNTHETIC-ROOT', error: { code: 'lease-lost', message: 'PRIVATE-SYNTHETIC-ERROR' } })
+    for (const request of [{ auth: false }, { origin: 'https://foreign.invalid' }]) {
+      const out = await h.request('/hermes-memory/ops', request)
+      assert.equal(out.value.storageSafety, undefined)
+      assert.ok(!JSON.stringify(out).includes('PRIVATE-SYNTHETIC'))
+    }
+    const failed = await h.request('/hermes-memory/ops')
+    assert.equal(failed.value.code, 'storage_reload_required')
+    assert.equal(failed.value.storageSafety.state, 'poisoned')
+    assert.equal(failed.value.storageSafety.errorCode, 'lease-lost')
+    assert.equal(failed.value.memory, undefined)
+    state = 'closing'
+    const closing = await h.request('/hermes-memory/stats')
+    assert.equal(closing.value.code, 'storage_reload_required')
+    assert.equal(closing.value.storageSafety.state, 'closing')
+  })
+
+  test(`${mode}: runtime publication failure and later list require runtime reload`, async t => {
+    const runtime = { format: 1, pending: { p: { id: 'p', target: 'memory', status: 'pending', operations: [], pins: [] } }, reviews: {} }
+    const h = await mount(t, mode, { runtime, runtimeFailure: Object.assign(new Error('Synthetic runtime EIO'), { code: 'EIO' }) })
+    const failed = await h.request('/hermes-memory/pending', { body: { action: 'discard', id: 'p' } })
+    assert.equal(failed.value.code, 'runtime_reload_required')
+    assert.equal(failed.value.storageSafety.state, 'poisoned')
+    assert.equal(failed.value.storageSafety.errorCode, 'EIO')
+    const later = await h.request('/hermes-memory/ops')
+    assert.equal(later.value.code, 'runtime_reload_required')
+    assert.equal(later.value.storageSafety.code, 'runtime_reload_required')
+    assert.equal(later.value.memory, undefined)
+    assert.equal((await h.call('memory_stats')).code, 'runtime_reload_required')
+    assert.equal(h.counters().writes, 0)
+  })
+
   test(`${mode}: HTTP list waits for initialization instead of reporting an empty bank`, async t => {
     const openGate = deferred()
     const h = await mount(t, mode, { openGate, snapshot: { global: null, tables: { memory: { one: record('stored') }, user: {} } } })
@@ -387,7 +501,7 @@ for (const mode of ['static', 'dynamic']) {
     assert.deepEqual((await reloaded.call('memory_list')).memory, ['Unrelated sibling'])
   })
 
-  test(`${mode}: panel versions survive failed or no-op changes and reject ambiguous identical rows`, async t => {
+  test(`${mode}: panel versions survive failed or no-op changes and support identical rows`, async t => {
     const h = await mount(t, mode)
     const post = body => h.request('/hermes-memory/ops', { body })
     await h.call('memory', { action: 'add', content: 'Synthetic original' })
@@ -398,10 +512,25 @@ for (const mode of ['static', 'dynamic']) {
     await h.call('memory', { action: 'add', content: 'Synthetic sibling' })
     await h.call('memory', { action: 'patch', oldText: 'Synthetic sibling', content: 'Synthetic original' })
     const duplicates = (await post({ action: 'list' })).value
-    for (const expectedVersion of duplicates.entryVersions.memory) {
-      assert.equal((await post({ action: 'remove', oldText: 'Synthetic original', expectedVersion })).status, 409)
-    }
-    assert.deepEqual((await h.call('memory_list')).memory, ['Synthetic original', 'Synthetic original'])
+    assert.deepEqual(duplicates.memory, ['Synthetic original', 'Synthetic original'])
+    assert.equal(duplicates.entryVersions.memory[0], first)
+    assert.notEqual(duplicates.entryVersions.memory[0], duplicates.entryVersions.memory[1])
+    const selected = duplicates.entryVersions.memory[1]
+    const edited = await post({ action: 'replace', oldText: duplicates.memory[1], content: 'Second row edited', expectedVersion: selected })
+    assert.equal(edited.status, 200)
+    assert.deepEqual((await h.call('memory_list')).memory, ['Synthetic original', 'Second row edited'])
+    const after = (await post({ action: 'list' })).value
+    assert.equal(after.entryVersions.memory[0], first)
+    assert.notEqual(after.entryVersions.memory[1], selected)
+    const stale = await post({ action: 'remove', oldText: 'Synthetic original', expectedVersion: selected })
+    assert.equal(stale.status, 409)
+    assert.equal(stale.value.code, 'row_conflict')
+    assert.equal((await post({ action: 'replace', oldText: 'Second row edited', content: 'Synthetic original', expectedVersion: after.entryVersions.memory[1] })).status, 200)
+    const restored = (await post({ action: 'list' })).value
+    assert.equal((await post({ action: 'remove', oldText: 'Synthetic original', expectedVersion: selected })).status, 409)
+    assert.equal((await post({ action: 'remove', oldText: 'Synthetic original', expectedVersion: restored.entryVersions.memory[1] })).status, 200)
+    assert.deepEqual((await h.call('memory_list')).memory, ['Synthetic original'])
+    assert.equal((await post({ action: 'list' })).value.entryVersions.memory[0], first)
     // The dynamic install has fixed defaults and does not accept static config.
     if (mode === 'static') {
       const hidden = await mount(t, mode, { snapshot: h.snapshot(), config: { memoryEnabled: false } })
@@ -409,6 +538,33 @@ for (const mode of ['static', 'dynamic']) {
       assert.deepEqual(list.memory, [])
       assert.deepEqual(list.entryVersions.memory, [])
     }
+  })
+
+  test(`${mode}: duplicate row versions reject delete-recreate and reload while preserving the sibling`, async t => {
+    const h = await mount(t, mode)
+    const post = body => h.request('/hermes-memory/ops', { body })
+    await h.call('memory', { action: 'add', content: 'Duplicate fact' })
+    await post({ action: 'add', content: 'Second fact' })
+    await post({ action: 'replace', oldText: 'Second fact', content: 'Duplicate fact' })
+    const before = (await post({ action: 'list' })).value
+    const original = before.entryVersions.memory[0], selected = before.entryVersions.memory[1]
+    assert.equal((await post({ action: 'remove', oldText: 'Duplicate fact', expectedVersion: selected })).status, 200)
+    await post({ action: 'add', content: 'Recreated fact' })
+    await post({ action: 'replace', oldText: 'Recreated fact', content: 'Duplicate fact' })
+    const recreated = (await post({ action: 'list' })).value
+    assert.equal(recreated.entryVersions.memory[0], original)
+    assert.notEqual(recreated.entryVersions.memory[1], selected)
+    assert.equal((await post({ action: 'remove', oldText: 'Duplicate fact', expectedVersion: selected })).status, 409)
+    const reloaded = await mount(t, mode, { snapshot: h.snapshot(), runtime: h.runtime().global })
+    assert.equal((await reloaded.request('/hermes-memory/ops', { body: { action: 'replace', oldText: 'Duplicate fact', content: 'Stale draft', expectedVersion: recreated.entryVersions.memory[1] } })).status, 409)
+    assert.deepEqual((await h.call('memory_list')).memory, ['Duplicate fact', 'Duplicate fact'])
+    // Internal selection remains inaccessible through public batch/tool inputs.
+    const forged = await post({ action: 'batch', operations: [{ action: 'patch', oldText: 'Duplicate', content: 'Selected', selectedSeq: 3 }] })
+    assert.equal(forged.status, 200)
+    assert.deepEqual((await h.call('memory_list')).memory, ['Selected fact', 'Duplicate fact'])
+    const rejected = await post({ action: 'batch', operations: [{ action: 'remove', oldText: 'fact', matched_entry: 'Duplicate fact' }] })
+    assert.equal(rejected.status, 422)
+    assert.match(rejected.value.error, /matched_entry does not match/)
   })
 
   test(`${mode}: duplicate sequence identity fails closed without changing the medium`, async t => {
@@ -552,6 +708,24 @@ async function completeTurn(h, turn, { source = 'user', reason = 'completed', te
   await h.emit('user/message', { id: 'user-' + turn, role: 'user', source: { kind: source }, content: [{ type: 'text', text: 'Synthetic user evidence ' + turn }] })
   await h.emit('assistant/message', { turn, step: 1, interrupted, message: { id: 'assistant-' + turn, role: 'assistant', source: { kind: 'model' }, content: [{ type: 'text', text }] } })
   await h.emit('turn/end', { turn, reason: { kind: reason } })
+}
+
+for (const [label, source] of [
+  ['producer-owned', { kind: 'plugin:dsh-hermes-memory' }],
+  ['legacy-hermes', { kind: 'plugin', plugin: 'hermes-memory' }],
+  ['legacy-dsh', { kind: 'plugin', plugin: 'dsh-hermes-memory' }],
+]) {
+  test(`static: review excludes ${label} plugin snapshots from evidence`, async t => {
+    const llm = scriptedLlm(['Nothing to save.'])
+    const h = await mount(t, 'static', { llm, config: { backgroundReview: { interval: 1 } } })
+    const originalDerive = h.session.deriveMessages.bind(h.session)
+    h.session.deriveMessages = () => [
+      { role: 'user', source, content: [{ type: 'text', text: '<hermes-memory-snapshot>legacy snapshot must stay out</hermes-memory-snapshot>' }] },
+      ...originalDerive(),
+    ]
+    await completeTurn(h, 1)
+    assert.doesNotMatch(llm.requests[0].messages[0].content[0].text, /legacy snapshot must stay out/)
+  })
 }
 
 test('static: background review runs at ten real user turns, independent of direct writes, and uses an isolated transcript', async t => {

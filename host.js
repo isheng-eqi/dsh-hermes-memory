@@ -180,7 +180,7 @@ function consolidationFailure(failures, max, bank, response, sessionId) {
  * 污染（跳号虽不破坏正确性，但保持"失败无副作用"更干净）。提交成功后由
  * 调用方把 `seqCounter.next - 1` 写回全局 seq。
  */
-function stepOperation(working, op, pos, seqCounter, exactEntry = false) {
+function stepOperation(working, op, pos, seqCounter, exactEntry = false, selectedSeq) {
   const content = op.action === 'patch' ? str(op.content) : str(op.content).trim()
   const oldText = op.action === 'patch' ? str(op.oldText ?? op.old_text) : str(op.oldText ?? op.old_text).trim()
   if (op.action === 'add') {
@@ -190,14 +190,15 @@ function stepOperation(working, op, pos, seqCounter, exactEntry = false) {
     }
     return null
   }
-  // 精确匹配优先（UI 传完整文本时永远唯一命中，即使该文本是其他条目的
-  // 子串——回归：条目 "11" 曾被其他含 "11" 的条目干扰而无法删除/编辑）；
-  // 无精确命中时回退 Hermes 原版子串语义（模型 memory 工具行为不变）。
+  // Full-text matching wins over sibling substrings. A versioned panel edit
+  // additionally binds the internally resolved sequence, even for identical
+  // rows. Keep this selection separate from public operation fields.
   const pinned = op.matched_entry !== undefined
   const expectedEntry = exactEntry ? (op.oldText ?? op.old_text) : op.matched_entry
-  const matches = expectedEntry === undefined
+  let matches = expectedEntry === undefined
     ? findEntryMatches(working, oldText)
     : working.map((entry, index) => ({ entry, index })).filter(({ entry }) => entry.text === expectedEntry)
+  if (selectedSeq !== undefined) matches = matches.filter(({ entry }) => entry.seq === selectedSeq)
   if (exactEntry && matches.length === 0) return pos + ': the entry changed or was removed. Refresh the memory list and try again.'
   if (matches.length === 0) return pinned
     ? `${pos}: the entry changed since approval was requested; nothing was applied.`
@@ -662,6 +663,11 @@ async function runReview(options = {}) {
 /** Background review scheduling. No host imports or main-session mutations. */
 function createReviewScheduler({ ctx, projection, settings, enabledBanks, claimReview, finishReview, runReview, tools, executeMemory, readMemory, system }) {
   const active = new Map()
+  const isPluginSource = source => {
+    if (!source || typeof source !== 'object') return false
+    const kind = String(source.kind || '')
+    return kind.startsWith('plugin:') || (kind === 'plugin' && ['hermes-memory', 'dsh-hermes-memory'].includes(source.plugin))
+  }
   const tasks = new Set()
   let disposed = false
   const nativeCancellation = typeof AbortController === 'function'
@@ -689,7 +695,7 @@ function createReviewScheduler({ ctx, projection, settings, enabledBanks, claimR
         config.provider = settings.provider; config.model = settings.model
       }
       const messages = session.deriveMessages()
-      const transcript = messages.filter(message => ['user', 'assistant', 'tool'].includes(message.role) && !String(message.source?.kind || '').startsWith('plugin:'))
+      const transcript = messages.filter(message => ['user', 'assistant', 'tool'].includes(message.role) && !isPluginSource(message.source))
         .map(message => ({ role: message.role, source: message.source?.kind || null,
           content: (message.content || []).filter(block => block.type === 'text').map(block => block.text).join('\n') }))
         .filter(message => message.content)
@@ -950,12 +956,14 @@ async function apply(ctx, config) {
     ready: false,
     disposed: false,
     error: null,
+    errorCode: null,
+    quarantined: false,
     openAttempts: 0,
   }
   const failures = new Map() // sessionId -> consolidation failure count this turn
   let lastOpenAttemptAt = 0
   let scheduler = null
-  const runtime = { unit: null, data: null, promise: null, error: null, unknown: false }
+  const runtime = { unit: null, data: null, promise: null, error: null, errorCode: null, unknown: false }
   const ownedStorage = { backend: null, promise: null }
   const projection = await ctx.sessionProjections.register({
     key: 'hermesMemory', stateVersion: 2,
@@ -1028,15 +1036,52 @@ async function apply(ctx, config) {
     }
     return storageBackend()
   }
-  const storageStatus = () => config.storageRoot !== undefined
-    ? ownedStorage.backend?.status() || { mode: 'guarded-native', state: 'unavailable' }
-    : { mode: 'host-json', crossProcessLock: false, externalChangeCheck: false, renameRetry: 'host-dependent' }
+  const reloadStorageCodes = new Set(['unknown-state', 'external-change', 'lease-lost', 'closed'])
+  const messageOf = error => String(error?.message || error)
+  const codeOf = error => typeof error?.code === 'string' ? error.code : null
+  const backendSafety = () => {
+    try {
+      const backend = storageBackend()
+      return { backend, status: typeof backend?.status === 'function' ? backend.status() : null }
+    } catch (error) {
+      // A failed health check must never make a cached view look healthy.
+      return { status: { state: 'poisoned', error: { code: codeOf(error) || 'status-failed', message: messageOf(error) } } }
+    }
+  }
+  const backendNeedsReload = status => Boolean(status && (reloadStorageCodes.has(status.error?.code)
+    || status.state !== undefined && !['open', 'unavailable', 'initializing'].includes(status.state)))
+  const storageStatus = () => {
+    const { backend, status } = backendSafety()
+    const base = config.storageRoot !== undefined
+      ? { ...status, mode: 'guarded-native' }
+      : { ...status, mode: 'host-json', crossProcessLock: false, externalChangeCheck: false, renameRetry: 'host-dependent' }
+    const backendError = typeof status?.error === 'string' ? status.error : status?.error?.message
+    const closing = store.disposed || ['closing', 'closed'].includes(status?.state)
+    const storageReload = store.quarantined || backendNeedsReload(status)
+    const unavailable = !store.ready || !backend?.kv || status?.state && status.state !== 'open' || runtime.error && !runtime.data
+    const state = closing ? 'closing' : storageReload || runtime.unknown ? 'poisoned' : unavailable ? 'unavailable' : 'open'
+    const code = closing || storageReload ? 'storage_reload_required' : runtime.unknown ? 'runtime_reload_required'
+      : unavailable ? 'storage_unavailable' : 'ok'
+    const error = state === 'open' ? null : closing ? backendError || 'Memory storage is closing; reload the plugin before retrying'
+      : storageReload ? store.error || backendError || 'Memory storage requires inspection and plugin reload'
+        : runtime.unknown ? runtime.error || 'Memory runtime outcome is unknown; reload the plugin before retrying'
+          : store.error || backendError || runtime.error || 'Memory storage is unavailable or initializing'
+    const errorCode = state === 'open' ? null : status?.error?.code || (runtime.unknown && !storageReload ? runtime.errorCode : store.errorCode)
+    return { ...base, state, code, error, ...(errorCode ? { errorCode } : {}) }
+  }
+  const rememberStorageError = (error, publication = false) => {
+    store.ready = false
+    store.errorCode = codeOf(error)
+    store.quarantined ||= publication || reloadStorageCodes.has(store.errorCode) || backendNeedsReload(backendSafety().status)
+    store.error = publication ? 'Memory storage outcome is unknown; reload the plugin before retrying' : messageOf(error)
+  }
+  const runtimeReloadError = () => Object.assign(new Error('Memory runtime outcome is unknown; reload the plugin before retrying'), { code: 'runtime_reload_required' })
   const cloneJson = value => JSON.parse(JSON.stringify(value))
   async function ensureRuntime() {
     // Runtime recovery is a write: a losing instance must never acquire it
     // before proving ownership of the main memory unit.
     await ensureReady()
-    if (runtime.unknown) throw new Error('Memory runtime outcome is unknown; reload the plugin before retrying')
+    if (runtime.unknown) throw runtimeReloadError()
     if (runtime.data) return
     if (!runtime.promise) runtime.promise = (async () => {
       const backend = storageBackend()
@@ -1061,10 +1106,11 @@ async function apply(ctx, config) {
           if (!BANKS.includes(record.target)) continue
           for (const pin of record.pins || record.pinnedIdentities || []) if (Number.isSafeInteger(pin.seq) && pin.seq > store.seq[record.target]) store.seq[record.target] = pin.seq
         }
-        runtime.unit = unit; runtime.data = recovered; runtime.error = null
+        runtime.unit = unit; runtime.data = recovered; runtime.error = null; runtime.errorCode = null
       } catch (error) { await unit.close(); throw error }
     })().catch(error => {
-      runtime.error = String(error.message || error)
+      runtime.error = messageOf(error)
+      runtime.errorCode = codeOf(error)
       if (error.code === 'unknown-state') runtime.unknown = true
       if (!runtime.unknown) runtime.promise = null
       throw error
@@ -1074,7 +1120,8 @@ async function apply(ctx, config) {
   async function saveRuntime(data) {
     await ensureRuntime()
     try { await runtime.unit.setGlobal(data) } catch (error) {
-      runtime.error = String(error.message || error)
+      runtime.error = messageOf(error)
+      runtime.errorCode = codeOf(error)
       runtime.unknown = true
       throw error
     }
@@ -1151,6 +1198,7 @@ async function apply(ctx, config) {
       store.unit = unit
       store.ready = true
       store.error = null
+      store.errorCode = null
       store.openAttempts += 1
     } catch (error) {
       await unit.close()
@@ -1160,23 +1208,32 @@ async function apply(ctx, config) {
 
   let initPromise = null
   function ensureReady() {
-    if (store.disposed) return Promise.reject(new Error('memory plugin is disposed'))
-    const safety = ownedStorage.backend?.status()
-    if (safety && safety.state !== 'open') {
-      store.ready = false
-      store.error = safety.error?.message || 'Guarded memory storage is unavailable; reload after inspection'
-      return Promise.reject(new Error(store.error))
+    if (store.disposed) return Promise.reject(Object.assign(new Error('memory plugin is disposed'), { code: 'closed' }))
+    if (store.quarantined) return Promise.reject(Object.assign(new Error(store.error), { code: store.errorCode || 'storage_reload_required' }))
+    const { status } = backendSafety()
+    if ((status && status.state !== undefined && status.state !== 'open') || backendNeedsReload(status)) {
+      const message = typeof status.error === 'string' ? status.error : status.error?.message
+      const error = Object.assign(new Error(message || 'Memory storage is unavailable; reload after inspection'), {
+        code: status.error?.code || (backendNeedsReload(status) ? 'storage_reload_required' : 'storage_unavailable'),
+      })
+      const wasReady = store.ready
+      rememberStorageError(error)
+      // A transient health status does not invalidate this already-owned unit.
+      // Keep it usable once the backend reports open again; publication failures
+      // and poisoned backends still permanently quarantine the plugin cache.
+      if (!store.quarantined) store.ready = wasReady
+      return Promise.reject(error)
     }
-    if (store.ready) return ownedStorage.backend ? store.unit.loadAll().then(() => {}, error => {
-      store.ready = false
-      store.error = String(error.message || error)
+    if (store.ready && !ownedStorage.backend) { store.error = null; store.errorCode = null; return Promise.resolve() }
+    if (store.ready) return store.unit.loadAll().then(() => { store.error = null; store.errorCode = null }, error => {
+      rememberStorageError(error)
       throw error
-    }) : Promise.resolve()
+    })
     if (initPromise === null) {
-      initPromise = openStore().catch((e) => {
-        store.error = String((e && e.message) || e)
+      initPromise = openStore().catch(error => {
+        rememberStorageError(error)
         initPromise = null
-        throw e
+        throw error
       })
     }
     return initPromise
@@ -1223,7 +1280,7 @@ async function apply(ctx, config) {
   }
   async function commitBatch(bank, operations, sessionId, options = {}) {
     await ensureReady()
-    if (runtime.unknown) throw new Error('Memory runtime outcome is unknown; reload the plugin before retrying')
+    if (runtime.unknown) throw runtimeReloadError()
     if (!ENABLED_BANKS.includes(bank)) return { success: false, target: bank, error: 'Memory bank is disabled: ' + bank }
     if (options.signal?.aborted) throw new Error('Memory write was cancelled')
     await ensureRuntime()
@@ -1244,12 +1301,15 @@ async function apply(ctx, config) {
     }
     const limit = LIMITS[bank]
     const recs = recordsOf(bank)
+    let selectedSeq
     if (options.expectedVersion !== undefined) {
-      const matches = recs.filter(record => record.text === operations[0].oldText)
-      if (matches.length !== 1 || versionOf(matches[0]) !== options.expectedVersion) {
+      const matches = recs.filter(record => record.text === (operations[0].oldText ?? operations[0].old_text)
+        && versionOf(record) === options.expectedVersion)
+      if (matches.length !== 1) {
         return { success: false, target: bank, conflict: true,
           error: 'The entry changed, was recreated, or the plugin reloaded. Refresh the memory list and start a new edit; your draft was not saved.' }
       }
+      selectedSeq = matches[0].seq
     }
     const working = recs.map((r) => ({ text: r.text, seq: r.seq, createdAt: r.createdAt, updatedAt: r.updatedAt }))
     working.bank = bank
@@ -1262,6 +1322,7 @@ async function apply(ctx, config) {
       if (op.action !== 'add') {
         const needle = op.oldText ?? op.old_text
         const matched = findEntryMatches(working, needle).map(match => match.entry)
+          .filter(entry => selectedSeq === undefined || entry.seq === selectedSeq)
         if (op.matched_entry !== undefined && (!matched.length || new Set(matched.map(record => record.text)).size !== 1 || op.matched_entry !== matched[0].text)) {
           return consolidationFailure(failures, MAX_CONSOLIDATION_FAILURES, bank, {
             success: false, target: bank, error: `Operation ${i + 1} (${op.action}): matched_entry does not match resolved old_text. No operations were applied (batch is all-or-nothing).`,
@@ -1274,7 +1335,7 @@ async function apply(ctx, config) {
           if (!options.exactEntry) stepOp = { ...op, matched_entry: entry.text }
         }
       }
-      const failure = stepOperation(working, stepOp, `Operation ${i + 1} (${op.action})`, seqCounter, options.exactEntry)
+      const failure = stepOperation(working, stepOp, `Operation ${i + 1} (${op.action})`, seqCounter, options.exactEntry, selectedSeq)
       if (failure !== null) {
         return consolidationFailure(failures, MAX_CONSOLIDATION_FAILURES, bank, {
           success: false,
@@ -1343,13 +1404,9 @@ async function apply(ctx, config) {
         const seqHighWater = { ...store.seq, [bank]: seqCounter.next - 1 }
         await store.unit.setGlobal({ format: 2, tables, seqHighWater })
       } catch (error) {
-        {
-          store.ready = false
-          store.error = 'Memory storage outcome is unknown; reload the plugin before retrying'
-          // Keep the rejected initialization promise: no further read or write may claim success.
-          initPromise = Promise.reject(new Error(store.error))
-          initPromise.catch(() => {})
-        }
+        // A rejected publication may already have committed, even on host-json.
+        // Quarantine this plugin cache until a fresh instance reads the truth.
+        rememberStorageError(error, true)
         throw error
       }
       store.tables[bank] = updated
@@ -1463,7 +1520,7 @@ async function apply(ctx, config) {
   // Maintenance is owner-only; no model tool can compact or export hidden banks.
   const maintenance = args => enqueue(async () => {
     await ensureReady()
-    if (runtime.unknown) throw new Error('Memory runtime outcome is unknown; reload the plugin before retrying')
+    if (runtime.unknown) throw runtimeReloadError()
     if (args.action === 'export') {
       // A read-only backup must not recover/rewrite in-flight evidence on GET.
       const unit = runtime.unit || await storageBackend().kv.open({ name: 'hermes_memory_runtime', version: 1, tables: [], hasGlobal: true })
@@ -1503,7 +1560,8 @@ async function apply(ctx, config) {
       for (const word of query.split(/\s+/).filter(w => w.length > 0)) {
         tokens.push(word)
         for (const run of word.match(/[\p{Script=Han}]{2,}/gu) || []) {
-          for (let i = 0; i < run.length - 1; i++) tokens.push(run.slice(i, i + 2))
+          const chars = [...run]
+          for (let i = 0; i < chars.length - 1; i++) tokens.push(chars.slice(i, i + 2).join(''))
         }
       }
       const uniqueTokens = [...new Set(tokens)]
@@ -1551,9 +1609,14 @@ async function apply(ctx, config) {
       ? `Memory store: MEMORY.md ${v.memory.entries} entries (${v.memory.usage}); USER.md ${v.user.entries} entries (${v.user.usage}); file: ${v.file}`
       : `Memory store not ready: ${v.error}`,
     async (_args, _exec) => {
-      try { await ensureReady() } catch (e) { return { ready: false, error: String((e && e.message) || e) } }
+      try { await ensureReady(); await store.chain } catch (error) {
+        const storageSafety = storageStatus()
+        return { ready: false, code: storageSafety.code, error: messageOf(error), storageSafety }
+      }
+      const storageSafety = storageStatus()
+      if (storageSafety.state !== 'open') return { ready: false, code: storageSafety.code, error: storageSafety.error, storageSafety }
       return {
-        ready: true, pendingCount: pendingCount(), storageSafety: storageStatus(),
+        ready: true, code: 'ok', pendingCount: pendingCount(), storageSafety,
         memory: { enabled: ENABLED_BANKS.includes('memory'), entries: entriesOf('memory').length, usage: usageLine('memory') },
         user: { enabled: ENABLED_BANKS.includes('user'), entries: entriesOf('user').length, usage: usageLine('user') },
         file: config.storageRoot !== undefined ? storageStatus().root + '/hermes_memory.json' : '~/.dsh/storages/hermes_memory.json',
@@ -1714,7 +1777,7 @@ async function apply(ctx, config) {
     const authorize = (req, res, method) => {
       const connection = ctx.get('connection')
       if (!connection || typeof connection.requestRejection !== 'function') {
-        json(res, 503, { success: false, error: 'DSH authenticated connection service is unavailable' })
+        json(res, 503, { success: false, code: 'auth_service_unavailable', error: 'DSH authenticated connection service is unavailable' })
         return false
       }
       const rejection = connection.requestRejection(req)
@@ -1729,9 +1792,28 @@ async function apply(ctx, config) {
       }
       return true
     }
-    const json = (res, code, value) => {
-      res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
-      res.end(JSON.stringify(value))
+    const json = (res, status, value) => {
+      // Authentication failures disclose no storage paths, lease or private
+      // backend diagnostics. The client handles these from the stable code.
+      if (status === 401 || status === 403 || value.code === 'auth_service_unavailable') {
+        const code = status === 401 ? 'unauthorized' : status === 403 ? 'forbidden' : 'auth_service_unavailable'
+        res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+        res.end(JSON.stringify({ ...value, code }))
+        return
+      }
+      const storageSafety = storageStatus()
+      // A queued write or backend heartbeat can fail after a route's initial
+      // readiness check. Never publish a successful cached view in that state.
+      if (status < 400 && storageSafety.state !== 'open') {
+        status = 503
+        value = { success: false, ...(value.ready !== undefined ? { ready: false } : {}),
+          code: storageSafety.code, error: storageSafety.error }
+      }
+      const code = status < 400 ? 'ok' : status === 409 ? 'row_conflict'
+        : status === 401 ? 'unauthorized' : status === 403 ? 'forbidden'
+          : value.code || (status < 500 ? 'validation_failed' : storageSafety.code === 'ok' ? 'storage_unavailable' : storageSafety.code)
+      res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+      res.end(JSON.stringify({ ...value, code, storageSafety }))
     }
     const readBody = async (req) => {
       const decoder = new TextDecoder('utf-8', { fatal: true })
@@ -1777,7 +1859,12 @@ async function apply(ctx, config) {
       handler: async (req, res) => {
         if (!authorize(req, res, req.method === 'GET' ? 'GET' : 'POST')) return
         try {
-          const args = req.method === 'GET' ? { action: 'list' } : JSON.parse(await readBody(req))
+          let args = { action: 'list' }
+          if (req.method !== 'GET') {
+            try { args = JSON.parse(await readBody(req)) } catch (error) {
+              json(res, error.status || 400, { success: false, error: messageOf(error) }); return
+            }
+          }
           if (!args || typeof args !== 'object' || Array.isArray(args)) { json(res, 400, { success: false, error: 'Expected an object' }); return }
           const out = await pendingAction(args, { source: 'owner-ui' })
           json(res, out.success ? 200 : 422, out)

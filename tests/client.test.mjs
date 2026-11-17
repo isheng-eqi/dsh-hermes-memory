@@ -55,7 +55,7 @@ function hooks() {
   }
   return {
     React,
-    render(key, component) {
+    render(key, component, commit) {
       current = instances.get(key) || { slots: [], mounted: true }
       instances.set(key, current)
       cursor = 0
@@ -63,6 +63,7 @@ function hooks() {
       const tree = component()
       const effects = pending
       current = undefined
+      commit?.(tree)
       effects.forEach((effect) => effect())
       return tree
     },
@@ -75,13 +76,49 @@ function hooks() {
   }
 }
 function documentStub() {
-  const elements = new Map()
-  return {
+  const elements = new Map(), listeners = new Map(), roots = new Map()
+  const doc = {
     elements,
+    activeElement: null,
     getElementById: (id) => elements.get(id),
     createElement() { return { remove() { elements.delete(this.id) } } },
     head: { appendChild(node) { elements.set(node.id, node) } },
+    addEventListener(type, handler) { if (!listeners.has(type)) listeners.set(type, new Set()); listeners.get(type).add(handler) },
+    removeEventListener(type, handler) { listeners.get(type)?.delete(handler) },
+    dispatch(type, init = {}) {
+      const event = { ...init, defaultPrevented: false, stopped: false,
+        preventDefault() { this.defaultPrevented = true }, stopPropagation() { this.stopped = true } }
+      for (const handler of listeners.get(type) || []) handler(event)
+      return event
+    },
+    listenerCount(type) { return listeners.get(type)?.size || 0 },
+    commit(key, tree) {
+      const previous = roots.get(key) || new Map(), next = new Map()
+      const build = (value, path) => {
+        if (Array.isArray(value)) return value.flatMap((item, i) => build(item, `${path}.${i}`))
+        if (!value || typeof value !== 'object') return []
+        if (typeof value.type === 'function') return build(value.type(value.props), `${path}.component`)
+        if (typeof value.type !== 'string') return build(value.children || [], path)
+        const node = previous.get(path) || {}
+        Object.assign(node, { type: value.type, props: value.props, disabled: !!value.props.disabled, hidden: !!value.props.hidden, isConnected: true,
+          tabIndex: value.props.tabIndex ?? (['button', 'input', 'textarea', 'select'].includes(value.type) || value.props.href ? 0 : -1),
+          focus() { doc.activeElement = this }, getAttribute(name) { return this.props[name] ?? null },
+          contains(target) { return target === this || this.children.some(child => child.contains(target)) },
+          querySelectorAll() { return this.children.flatMap(child => [child, ...child.querySelectorAll()]).filter(child => ['button', 'input', 'textarea', 'select'].includes(child.type) || child.props.href || child.props.tabIndex !== undefined) },
+        })
+        next.set(path, node)
+        node.children = build(value.children || [], `${path}.children`)
+        value.dom = node
+        if (value.props.ref) value.props.ref.current = node
+        return [node]
+      }
+      build(tree, 'root')
+      for (const [path, node] of previous) if (!next.has(path)) node.isConnected = false
+      roots.set(key, next)
+    },
+    disconnect(key) { for (const node of roots.get(key)?.values() || []) node.isConnected = false; roots.delete(key) },
   }
+  return doc
 }
 function walk(tree, predicate) {
   if (Array.isArray(tree)) return tree.flatMap((node) => walk(node, predicate))
@@ -98,7 +135,7 @@ function button(tree, label) {
   return found
 }
 function fixture(transport, dynamic = false) {
-  const runner = hooks(), doc = documentStub(), entries = new Map(), disposers = [], calls = []
+  const runner = hooks(), doc = documentStub(), entries = new Map(), disposers = [], calls = [], copied = []
   const slots = {
     register(options, component) { const key = options.id || options.key; entries.set(key, component); return () => entries.delete(key) },
     inject(_slot, effect) { const off = effect(); disposers.push(off); return off },
@@ -110,22 +147,23 @@ function fixture(transport, dynamic = false) {
   } else {
     vm.runInNewContext(source, {
       window: { __ModuleLoader__: { load(registration) { plugin = registration.factory(() => runner.React) } } },
-      document: doc, fetch: invoke,
+      document: doc, fetch: invoke, navigator: { clipboard: { async writeText(value) { copied.push(value) } } },
     })
   }
   plugin.apply({ get: () => slots, effect(fn) { const off = fn(); disposers.push(off); return off } })
-  const render = () => runner.render('view', entries.get(dynamic ? 'self' : 'hermes-memory-panel'))
+  const render = () => runner.render('view', entries.get(dynamic ? 'self' : 'hermes-memory-panel'), tree => doc.commit('view', tree))
+  const open = () => {
+    const entry = runner.render('entry', entries.get('hermes-memory'), tree => doc.commit('entry', tree))
+    entry.dom.focus()
+    entry.props.onClick()
+    return render()
+  }
   return {
-    plugin, calls, doc, runner, render,
-    show() {
-      render()
-      const entry = runner.render('entry', entries.get('hermes-memory'))
-      entry.props.onClick()
-      return render()
-    },
+    plugin, calls, doc, runner, render, copied,
+    show() { render(); return open() },
     close() { button(render(), '×').props.onClick(); render() },
-    reopen() { runner.render('entry', entries.get('hermes-memory')).props.onClick(); return render() },
-    dispose() { runner.unmount('view'); disposers.reverse().forEach((off) => off?.()) },
+    reopen: open,
+    dispose() { runner.unmount('view'); doc.disconnect('view'); disposers.reverse().forEach((off) => off?.()) },
   }
 }
 function section(tree, bank = 'memory') {
@@ -168,7 +206,6 @@ for (const [name, value] of [
   ['not ready', response({ ready: false, error: 'synthetic unavailable' })],
   ['malformed list', response({ memory: {}, user: [], usage: {} })],
   ['null JSON', response(null)],
-  ['HTTP 401 non-JSON', { ok: false, status: 401, json: async () => { throw new Error('not JSON') } }],
 ]) {
   test(`static: ${name} is visible and retryable, never a successful empty bank`, async () => {
     let attempt = 0
@@ -349,44 +386,45 @@ test('static: a stale delete keeps its confirmation and error without changing t
   assert.equal(section(h.render()).deleting, null)
 })
 
-test('static: row versions stay attached to the original draft and delete confirmation across refreshes', async () => {
+test('static: refresh never blesses a stale draft or delete confirmation with a fresh row version', async () => {
   for (const action of ['replace', 'remove']) {
     let version = 'epoch:first'
     const h = fixture(async (_path, init) => JSON.parse(init.body).action === 'list'
-      ? response({ ...list(), entryVersions: { memory: [version], user: [] } })
-      : response({ error: 'The entry changed or was recreated. Refresh the memory list.' }, 409))
+      ? response({ ...list(), entryVersions: { memory: [version], user: [] } }) : response({ success: true }))
     h.show()
     await tick()
     if (action === 'replace') section(h.render()).onEdit({ bank: 'memory', index: 0, original: 'synthetic entry', text: 'retained draft' })
     else section(h.render()).onRemove('memory', 'synthetic entry')
+    const staleHandler = action === 'replace' ? section(h.render()).onSave : section(h.render()).onConfirmRemove
     version = 'epoch:replacement'
     button(h.render(), '刷新').props.onClick()
     await tick()
+    const props = section(h.render())
     if (action === 'replace') {
       assert.match(text(sectionView(h.render())), /原条目已变化或被删除/)
-      section(h.render()).onEdit({ ...section(h.render()).editing, text: 'retained edited draft' })
-      section(h.render()).onSave()
-    } else section(h.render()).onConfirmRemove()
+      assert.equal(props.editing.expectedVersion, 'epoch:first')
+      section(h.render()).onEdit({ ...props.editing, text: 'retained edited draft' })
+      assert.equal(button(sectionView(h.render()), '保存').props.disabled, true)
+      staleHandler(); section(h.render()).onSave()
+      await section(h.render()).onCopy()
+      assert.equal(h.copied[0], 'retained edited draft')
+      assert.match(text(sectionView(h.render())), /草稿已复制.*取消.*刷新列表/)
+      section(h.render()).onCancel()
+      section(h.render()).onEdit({ bank: 'memory', index: 0, original: 'synthetic entry', text: 'fresh draft' })
+    } else {
+      assert.equal(props.deleting.expectedVersion, 'epoch:first')
+      assert.equal(button(sectionView(h.render()), '确认删除').props.disabled, true)
+      staleHandler(); props.onConfirmRemove()
+      props.onCancelRemove()
+      section(h.render()).onRemove('memory', 'synthetic entry')
+    }
+    assert.equal(h.calls.filter(([, init]) => JSON.parse(init.body).action === action).length, 0)
+    if (action === 'replace') section(h.render()).onSave()
+    else section(h.render()).onConfirmRemove()
     await tick()
     const writes = h.calls.map(([, init]) => JSON.parse(init.body)).filter(body => body.action === action)
     assert.equal(writes.length, 1)
-    assert.equal(writes[0].expectedVersion, 'epoch:first')
-    const props = section(h.render())
-    assert.match(text(sectionView(h.render())), /entry changed or was recreated/)
-    if (action === 'replace') {
-      assert.equal(props.editing.text, 'retained edited draft')
-      props.onCancel()
-      section(h.render()).onEdit({ bank: 'memory', index: 0, original: 'synthetic entry', text: 'fresh draft' })
-      section(h.render()).onSave()
-    } else {
-      assert.equal(props.deleting.text, 'synthetic entry')
-      props.onCancelRemove()
-      section(h.render()).onRemove('memory', 'synthetic entry')
-      section(h.render()).onConfirmRemove()
-    }
-    await tick()
-    const retried = h.calls.map(([, init]) => JSON.parse(init.body)).filter(body => body.action === action)
-    assert.equal(retried[1].expectedVersion, 'epoch:replacement')
+    assert.equal(writes[0].expectedVersion, 'epoch:replacement')
     h.dispose()
   }
 })
@@ -569,6 +607,260 @@ test('static: export is an owner download and history compaction requires confir
   pending.resolve(response({ success: true }))
   await tick()
   assert.equal(walk(h.render(), node => node.props['aria-label'] === '确认压缩历史详情').length, 0)
+  h.dispose()
+})
+
+for (const status of [401, 403]) {
+  test(`static: non-JSON HTTP ${status} keeps authentication meaning and has no futile retry`, async () => {
+    const h = fixture(async () => ({ ok: false, status, json: async () => { throw new Error('synthetic HTML login response') } }))
+    h.show()
+    await tick()
+    const tree = h.render()
+    assert.match(text(tree), status === 401 ? /登录已过期.*重新登录/ : /没有操作权限.*重新登录/)
+    assert.doesNotMatch(text(tree), /非 JSON|请重试|重试载入/)
+    assert.equal(walk(tree, node => node.type === 'button' && /刷新|重试/.test(text(node))).length, 0)
+    assert.equal(h.calls.length, 1)
+    h.close(); h.reopen()
+    await tick()
+    assert.equal(h.calls.length, 1, 'reopening is not an authentication retry')
+    h.dispose()
+  })
+}
+
+test('static: first poisoned write immediately blocks all writes, preserves drafts, and offers no reload retry', async () => {
+  const poisoned = { mode: 'guarded-native', state: 'poisoned', code: 'storage_reload_required', error: 'synthetic external change' }
+  const h = fixture(async (_path, init) => JSON.parse(init.body).action === 'list'
+    ? response({ ...list(), storageSafety: { mode: 'guarded-native', state: 'open' } })
+    : response({ success: false, code: 'storage_reload_required', error: 'synthetic external change', storageSafety: poisoned }, 503))
+  h.show()
+  await tick()
+  section(h.render()).onDraft('retained add draft')
+  section(h.render()).onEdit({ bank: 'memory', index: 0, original: 'synthetic entry', text: 'retained edit draft' })
+  const staleSave = section(h.render()).onSave, staleRefresh = button(h.render(), '刷新').props.onClick
+  staleSave()
+  await tick()
+  const tree = h.render(), props = section(tree), view = sectionView(tree)
+  assert.match(text(tree), /存储保护已触发.*写入已暂停/)
+  assert.equal(props.editError.status, 503)
+  assert.equal(props.editError.code, 'storage_reload_required')
+  assert.equal(props.editing.text, 'retained edit draft')
+  assert.equal(props.draft, 'retained add draft')
+  assert.equal(props.list[0], 'synthetic entry')
+  assert.equal(button(view, '保存').props.disabled, true)
+  assert.equal(button(view, '取消').props.disabled, false)
+  assert.equal(button(view, '添加').props.disabled, true)
+  assert.equal(walk(tree, node => node.type === 'button' && /刷新|重试/.test(text(node))).length, 0)
+  staleSave(); staleRefresh(); props.onAdd()
+  await tick()
+  assert.equal(h.calls.length, 2, 'neither mutation nor load is automatically replayed')
+  h.dispose()
+})
+
+test('static: poisoned subsequent list retains last good rows and drafts, host JSON limitations stay visible', async () => {
+  let loads = 0
+  const h = fixture(async () => ++loads === 1
+    ? response({ ...list(), storageSafety: { mode: 'host-json', state: 'open', crossProcessLock: false, externalChangeCheck: false } })
+    : response({ ready: false, code: 'storage_reload_required', error: 'synthetic poisoned load', storageSafety: { mode: 'guarded-native', state: 'poisoned' } }, 503))
+  h.show()
+  await tick()
+  assert.match(text(h.render()), /宿主 JSON.*跨进程写锁.*外部变更检查/)
+  section(h.render()).onDraft('retained list draft')
+  button(h.render(), '刷新').props.onClick()
+  await tick()
+  const tree = h.render()
+  assert.equal(section(tree).list[0], 'synthetic entry')
+  assert.equal(section(tree).draft, 'retained list draft')
+  assert.equal(section(tree).writesBlocked, true)
+  assert.match(text(tree), /存储保护已触发/)
+  assert.doesNotMatch(text(tree), /重试载入|可重试/)
+  h.dispose()
+})
+
+for (const code of ['runtime_reload_required', 'unauthorized', 'forbidden']) {
+  test(`static: ${code} write errors block stale handlers and preserve local editor`, async () => {
+    const h = fixture(async (_path, init) => JSON.parse(init.body).action === 'list' ? response(list())
+      : response({ success: false, code, error: 'synthetic terminal error' }, code === 'unauthorized' ? 401 : code === 'forbidden' ? 403 : 503))
+    h.show()
+    await tick()
+    section(h.render()).onEdit({ bank: 'memory', index: 0, original: 'synthetic entry', text: 'terminal draft' })
+    const save = section(h.render()).onSave
+    save()
+    await tick()
+    save()
+    assert.equal(h.calls.length, 2)
+    assert.equal(section(h.render()).editError.code, code)
+    assert.equal(section(h.render()).editing.text, 'terminal draft')
+    assert.equal(button(sectionView(h.render()), '保存').props.disabled, true)
+    assert.equal(walk(h.render(), node => node.type === 'button' && /刷新|重试/.test(text(node))).length, 0)
+    h.dispose()
+  })
+}
+
+test('static: retryable storage unavailable uses a read recovery, never replays the failed write', async () => {
+  let available = false
+  const h = fixture(async (_path, init) => JSON.parse(init.body).action === 'list'
+    ? response({ ...list(), storageSafety: { mode: 'guarded-native', state: 'open' } })
+    : available ? response({ success: true }) : response({ success: false, code: 'storage_unavailable', retryable: true,
+      error: 'synthetic temporarily unavailable', storageSafety: { mode: 'guarded-native', state: 'unavailable' } }, 503))
+  h.show()
+  await tick()
+  section(h.render()).onDraft('retained temporary draft')
+  section(h.render()).onAdd()
+  await tick()
+  assert.equal(section(h.render()).writesBlocked, true)
+  assert.equal(section(h.render()).draft, 'retained temporary draft')
+  button(h.render(), '刷新').props.onClick()
+  await tick()
+  assert.equal(section(h.render()).writesBlocked, false)
+  assert.equal(h.calls.filter(([, init]) => JSON.parse(init.body).action === 'add').length, 1)
+  available = true
+  section(h.render()).onAdd()
+  await tick()
+  assert.equal(section(h.render()).draft, '')
+  h.dispose()
+})
+
+for (const action of ['replace', 'remove']) {
+  test(`static: structured ${action} conflict disables stale resubmission until explicit cancel/reselect`, async () => {
+    let version = 'v:old', writes = 0
+    const h = fixture(async (_path, init) => JSON.parse(init.body).action === 'list'
+      ? response({ ...list(), entryVersions: { memory: [version], user: [] } })
+      : ++writes === 1 ? response({ success: false, code: 'row_conflict', conflict: true, error: 'synthetic row conflict' }, 409)
+        : response({ success: true }))
+    h.show()
+    await tick()
+    const start = () => action === 'replace'
+      ? section(h.render()).onEdit({ bank: 'memory', index: 0, original: 'synthetic entry', text: 'conflicting draft' })
+      : section(h.render()).onRemove('memory', 'synthetic entry', 0)
+    const submit = () => action === 'replace' ? section(h.render()).onSave : section(h.render()).onConfirmRemove
+    start()
+    const staleSubmit = submit()
+    staleSubmit()
+    await tick()
+    const failure = action === 'replace' ? section(h.render()).editError : section(h.render()).deleteError
+    assert.equal(failure.status, 409)
+    assert.equal(failure.code, 'row_conflict')
+    assert.equal(button(sectionView(h.render()), action === 'replace' ? '保存' : '确认删除').props.disabled, true)
+    staleSubmit(); submit()()
+    assert.equal(writes, 1)
+    version = 'v:current'
+    button(h.render(), '刷新').props.onClick()
+    await tick()
+    staleSubmit(); submit()()
+    assert.equal(writes, 1)
+    if (action === 'replace') {
+      assert.equal(section(h.render()).editing.text, 'conflicting draft')
+      await section(h.render()).onCopy()
+      assert.equal(h.copied[0], 'conflicting draft')
+      section(h.render()).onCancel()
+    } else section(h.render()).onCancelRemove()
+    start(); submit()()
+    await tick()
+    const requests = h.calls.map(([, init]) => JSON.parse(init.body)).filter(body => body.action === action)
+    assert.equal(requests.length, 2)
+    assert.equal(requests[0].expectedVersion, 'v:old')
+    assert.equal(requests[1].expectedVersion, 'v:current')
+    h.dispose()
+  })
+}
+
+test('static: accessible row names, codepoint excerpts, contrast, wrapping and named dialog controls', async () => {
+  const entry = '😀'.repeat(33)
+  const h = fixture(async () => response({ ...list([entry, entry]), user: [entry] }))
+  h.show()
+  await tick()
+  const tree = h.render(), dialog = walk(tree, node => node.props.role === 'dialog')[0]
+  assert.equal(dialog.props['aria-modal'], true)
+  assert.equal(walk(tree, node => node.props.id === dialog.props['aria-labelledby']).length, 1)
+  assert.equal(button(tree, '×').props['aria-label'], '关闭记忆面板')
+  const view = sectionView(tree), actions = walk(view, node => node.props.className === 'hm-action')
+  assert.equal(actions[0].props['aria-label'], `编辑 MEMORY 第 1 条：${'😀'.repeat(32)}…`)
+  assert.notEqual(actions[0].props['aria-label'], actions[2].props['aria-label'])
+  assert.notEqual(actions[0].props['aria-label'], walk(sectionView(tree, 'user'), node => node.props.className === 'hm-action')[0].props['aria-label'])
+  for (const action of actions) {
+    assert.equal(action.props.style.color, '#6b6b6b')
+    assert.equal(action.props.style.opacity, 1)
+    assert.ok(action.props.style.minWidth >= 24 && action.props.style.minHeight >= 24)
+  }
+  const entryText = walk(view, node => node.type === 'span' && text(node) === entry)[0]
+  assert.equal(entryText.props.style.wordBreak, 'normal')
+  assert.equal(entryText.props.style.overflowWrap, 'anywhere')
+  assert.equal(walk(view, node => node.type === 'input')[0].props['aria-label'], '添加 MEMORY 记忆条目')
+  assert.match(h.doc.elements.values().next().value.textContent, /:focus-visible.*outline: 2px solid/)
+  h.dispose()
+})
+
+test('static: modal focuses inside, traps both Tab directions, Escape closes and restores opener on close/unmount', async () => {
+  const h = fixture(async () => response(list()))
+  h.show()
+  await tick()
+  let tree = h.render(), dialog = walk(tree, node => node.props.role === 'dialog')[0].dom
+  const opener = h.doc.activeElement
+  assert.equal(opener.props['aria-label'], '关闭记忆面板')
+  assert.equal(h.doc.listenerCount('keydown'), 1)
+  let targets = dialog.querySelectorAll().filter(node => !node.disabled && node.tabIndex >= 0)
+  const first = targets[0], last = targets.at(-1)
+  last.focus()
+  assert.equal(h.doc.dispatch('keydown', { key: 'Tab' }).defaultPrevented, true)
+  assert.equal(h.doc.activeElement, first)
+  first.focus()
+  assert.equal(h.doc.dispatch('keydown', { key: 'Tab', shiftKey: true }).defaultPrevented, true)
+  assert.equal(h.doc.activeElement, last)
+  targets[1].focus()
+  assert.equal(h.doc.dispatch('keydown', { key: 'Tab' }).defaultPrevented, false)
+  const escape = h.doc.dispatch('keydown', { key: 'Escape' })
+  assert.equal(escape.defaultPrevented, true)
+  assert.equal(escape.stopped, true)
+  assert.equal(h.render(), null)
+  assert.equal(h.doc.activeElement.props['aria-label'], '打开记忆面板')
+  assert.equal(h.doc.listenerCount('keydown'), 0)
+  h.reopen()
+  await tick()
+  tree = h.render()
+  assert.equal(h.doc.activeElement.props['aria-label'], '关闭记忆面板')
+  h.close()
+  assert.equal(h.doc.activeElement.props['aria-label'], '打开记忆面板')
+  h.reopen()
+  await tick()
+  h.dispose()
+  assert.equal(h.doc.activeElement.props['aria-label'], '打开记忆面板')
+  assert.equal(h.doc.listenerCount('keydown'), 0)
+})
+
+for (const code of ['storage_reload_required', 'runtime_reload_required', 'unauthorized', 'forbidden']) {
+  test(`dynamic: ${code} retains last good statistics and removes futile Retry`, async () => {
+    let attempt = 0
+    const h = fixture(async () => ++attempt === 1 ? { ...stats(5), storageSafety: { mode: 'host-json', state: 'open' } }
+      : { ready: false, code, error: 'synthetic terminal error', ...(code === 'storage_reload_required' ? { storageSafety: { mode: 'guarded-native', state: 'poisoned' } } : {}) }, true)
+    h.render()
+    await tick()
+    assert.match(text(h.render()), /no cross-process writer lock/)
+    const oldRefresh = button(h.render(), 'Refresh').props.onClick
+    oldRefresh()
+    await tick()
+    assert.match(text(h.render()), /5 entries/)
+    assert.equal(walk(h.render(), node => node.type === 'button').length, 0)
+    assert.match(text(h.render()), code === 'unauthorized' ? /Sign in again/ : code === 'forbidden' ? /does not have permission/ : /reload the plugin/)
+    oldRefresh()
+    await tick()
+    assert.equal(h.calls.length, 2)
+    h.dispose()
+  })
+}
+
+test('dynamic: structured temporary unavailable remains read-retryable and preserves statistics', async () => {
+  let attempt = 0
+  const h = fixture(async () => ++attempt === 1 ? stats(6) : attempt === 2
+    ? { ready: false, code: 'storage_unavailable', retryable: true, error: 'synthetic retryable failure', storageSafety: { mode: 'host-json', state: 'unavailable' } }
+    : stats(7), true)
+  h.render()
+  await tick()
+  button(h.render(), 'Refresh').props.onClick()
+  await tick()
+  assert.match(text(h.render()), /6 entries.*Retry|Retry.*6 entries/)
+  button(h.render(), 'Retry').props.onClick()
+  await tick()
+  assert.match(text(h.render()), /7 entries/)
   h.dispose()
 })
 

@@ -35,11 +35,25 @@ The registered DSH JSON backend's open-handle registry prevents duplicate units 
 }
 ```
 
-For deletion, send `action: "remove"` with the same `bank`, complete `oldText`, and captured `expectedVersion`; omit `content`. The updated official panel captures these values when the edit or deletion starts. The queued commit requires exactly one full-text match and its matching row version. A changed, missing, ambiguous, or outdated row returns HTTP **409 Conflict**; the panel retains the draft or delete confirmation rather than silently applying it to a different version. Refresh to inspect the current entry, then deliberately start a new edit or deletion rather than replacing a retained draft's token automatically.
+For deletion, send `action: "remove"` with the same `bank`, complete `oldText`, and captured `expectedVersion`; omit `content`. The updated official panel captures these values when the edit or deletion starts. The queued commit selects the one record matching both the complete text and captured version, so two identical-text rows remain independently editable and removable. The same selected identity is used for the mutation and any approval pin. A changed, missing, or outdated row returns HTTP **409 Conflict** with `code: "row_conflict"`; the panel retains the local draft or delete confirmation, blocks another stale submission, and never applies it to a different version. Copy the draft if needed, refresh to inspect the current entry, then cancel and deliberately start a new edit or deletion. Refreshing alone never replaces a retained draft's token.
 
 This detects ABA cases: an entry changes from A to B and back to A, or is deleted and recreated with the same text. Reloading the plugin also invalidates old tokens. Editing a different row does not invalidate the token for an unchanged row. Tokens are opaque, scoped to the current plugin instance, and held in memory; this adds no persisted storage format.
 
 Older HTTP callers that omit `expectedVersion` retain the full-text check and do **not** gain ABA protection. The protocol covers the updated official panel's `replace` / `remove` path, not agent tools or pending approvals. Approval separately checks the current full text and sequence identity, which can still match after a same-identity A-to-B-to-A change. `patch` / `batch` are outside the row-version protocol and return HTTP 400 if supplied with `expectedVersion`. A row token does not detect another process overwriting the underlying JSON files; use the storage protection below for that boundary.
+
+## Respond to panel errors
+
+Authenticated list and error responses include `storageSafety` with `mode`, `state`, a stable `code`, and an error message when relevant. Authentication rejections expose only a stable code and a generic explanation, withholding local storage paths and diagnostics. `state: "open"` means this instance can operate; it does not add cross-process protection to host-JSON mode. `poisoned`, `closing`, or `unavailable` states disable panel writes. A failed publication also marks host-JSON mode as poisoned even when its backend has no native status API. A guarded backend's detected lease loss or poison is reported before a cached list can be presented as healthy.
+
+| Response code | What to do |
+| --- | --- |
+| `unauthorized` / `forbidden` (HTTP 401 / 403) | Reopen through the DSH login entry. Repeated retries from the same expired or rejected page are not offered. |
+| `storage_reload_required` / `runtime_reload_required` | Stop writes, preserve the files and inspect the outcome, then reload the plugin. Retrying the same operation can duplicate a write that already reached disk. The panel keeps the last successful list and local drafts visible and does not offer a futile load retry. |
+| `row_conflict` (HTTP 409) | Copy or inspect the local draft, refresh the current list, cancel the stale editor or deletion, and start again. Refresh does not silently authorize an old draft against a new record. |
+| `storage_unavailable` / `auth_service_unavailable` | Resolve the missing or temporarily unavailable service, then retry the read. A read retry never replays a write. |
+| `validation_failed` | Correct the proposed content or operation; it was rejected before a successful commit. |
+
+Stable codes drive the panel's localized explanation and available actions; English diagnostic details may be shown separately. “Local draft retained” does not mean the content was saved to memory. Storage status is updated on responses; this is not continuous monitoring of the filesystem or of other processes.
 
 ## Native guarded mode
 
