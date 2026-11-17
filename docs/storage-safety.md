@@ -71,7 +71,7 @@ This is a cooperative single-writer protocol on a local filesystem. Older plugin
 
 ## Online maintenance
 
-In the authenticated Memory panel, **导出备份** downloads one JSON export. **压缩历史详情** asks for an explicit confirmation, then compacts eligible details older than 30 days, keeping the newest 100 detailed resolved records per collection. Neither capability is registered as a model tool.
+In the authenticated Memory panel (`记忆`), **导出备份** (Export backup) downloads one JSON export. **压缩历史详情** (Compact history details) asks for an explicit confirmation, then compacts eligible details older than 30 days, keeping the newest 100 detailed resolved records per collection. Neither capability is registered as a model tool.
 
 The owner-authenticated routes are:
 
