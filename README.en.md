@@ -28,7 +28,7 @@ The implementation verification record covers DSH `0.2.2-alpha.2`, Node `24.22.2
 
 ![Memory panel showing synthetic offline entries, storage status, and row actions](docs/panel.png)
 
-The panel currently uses Simplified Chinese; this English README explains its controls. A complete interface translation is welcome as a separate contribution. The panel supports Escape to close, trapped Tab navigation, focus restoration to its opener, and entry-specific accessible action names.
+The panel follows the interface language selected in DSH settings: Chinese locales (zh, zh-CN, zh-TW, …) show Simplified Chinese and every other language shows English, matching DSH's own English fallback. Hosts without the locale service keep the Simplified Chinese panel. The dynamic statistics card follows the same setting and stays in English without it. Error details returned by the server are shown verbatim. The panel supports Escape to close, trapped Tab navigation, focus restoration to its opener, and entry-specific accessible action names.
 
 ### Observe automatic memory
 

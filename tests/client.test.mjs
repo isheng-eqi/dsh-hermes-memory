@@ -134,7 +134,26 @@ function button(tree, label) {
   assert.ok(found, `button ${label} exists`)
   return found
 }
-function fixture(transport, dynamic = false) {
+/** Synthetic DSH locale service: the active id, change subscription and listener count. */
+function localeService(active) {
+  const listeners = new Set()
+  return {
+    listeners,
+    getLocale: () => ({ active, locales: [], revision: 0 }),
+    subscribe(fn) { listeners.add(fn); return () => { listeners.delete(fn) } },
+    switchTo(next) { active = next; for (const fn of [...listeners]) fn() },
+  }
+}
+/** Every visible string and labelled attribute, for "no untranslated text" checks. */
+function visibleStrings(tree) {
+  return walk(tree, () => true).flatMap(node => [
+    ...(node.children || []).filter(child => typeof child === 'string' || typeof child === 'number').map(String),
+    ...['aria-label', 'placeholder', 'title'].map(name => node.props?.[name]).filter(value => typeof value === 'string'),
+  ])
+}
+const HAN = /[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/u
+
+function fixture(transport, dynamic = false, services = {}) {
   const runner = hooks(), doc = documentStub(), entries = new Map(), disposers = [], calls = [], copied = []
   const slots = {
     register(options, component) { const key = options.id || options.key; entries.set(key, component); return () => entries.delete(key) },
@@ -150,7 +169,7 @@ function fixture(transport, dynamic = false) {
       document: doc, fetch: invoke, navigator: { clipboard: { async writeText(value) { copied.push(value) } } },
     })
   }
-  plugin.apply({ get: () => slots, effect(fn) { const off = fn(); disposers.push(off); return off } })
+  plugin.apply({ get: (name) => name === 'slots' ? slots : services[name], effect(fn) { const off = fn(); disposers.push(off); return off } })
   const render = () => runner.render('view', entries.get(dynamic ? 'self' : 'hermes-memory-panel'), tree => doc.commit('view', tree))
   const open = () => {
     const entry = runner.render('entry', entries.get('hermes-memory'), tree => doc.commit('entry', tree))
@@ -862,6 +881,152 @@ test('dynamic: structured temporary unavailable remains read-retryable and prese
   await tick()
   assert.match(text(h.render()), /7 entries/)
   h.dispose()
+})
+
+test('static: follows the DSH locale, localizes every panel state, and keeps drafts across a switch', async () => {
+  const locale = localeService('en')
+  const payload = { ...list(['first synthetic entry', 'second synthetic entry']), user: ['user synthetic entry'],
+    storageSafety: { mode: 'host-json', state: 'open' }, backgroundReview: { enabled: true, interval: 10, status: 'completed' },
+    pending: [{ id: 'synthetic-pending', target: 'memory', operations: [{ action: 'patch', oldText: 'old synthetic', content: 'new synthetic' }] }] }
+  const h = fixture(async () => response(payload), false, { locale })
+  h.show()
+  await tick()
+  const untranslated = () => {
+    const tree = h.render()
+    return [tree, sectionView(tree), sectionView(tree, 'user')].flatMap(visibleStrings).filter(value => HAN.test(value))
+  }
+  let tree = h.render()
+  assert.match(text(tree), /Storage protection · host JSON mode/)
+  assert.match(text(tree), /Background review · every 10 user turns · last review completed/)
+  assert.match(text(tree), /Pending changes · 1/)
+  assert.match(text(tree), /Original: old synthetic/)
+  assert.equal(button(tree, '×').props['aria-label'], 'Close memory panel')
+  for (const label of ['Approve', 'Discard', 'Export backup', 'Refresh']) assert.ok(walk(tree, node => text(node).includes(label)).length > 0, label)
+  const view = sectionView(tree), actions = walk(view, node => node.props.className === 'hm-action')
+  assert.equal(actions[0].props['aria-label'], 'Edit MEMORY entry 1: first synthetic entry')
+  assert.equal(actions[1].props['aria-label'], 'Delete MEMORY entry 1: first synthetic entry')
+  assert.equal(walk(view, node => node.type === 'input')[0].props['aria-label'], 'Add a MEMORY memory entry')
+  assert.match(text(view), /2 entries/)
+  assert.match(text(sectionView(tree, 'user')), /1 entry(?!\w)/)
+  assert.deepEqual(untranslated(), [])
+  button(tree, 'Compact history details').props.onClick()
+  assert.match(text(h.render()), /Export a backup first/)
+  assert.deepEqual(untranslated(), [])
+  section(h.render()).onEdit({ bank: 'memory', index: 0, original: 'first synthetic entry', text: 'edited synthetic draft' })
+  assert.ok(button(sectionView(h.render()), 'Save'))
+  assert.deepEqual(untranslated(), [])
+  section(h.render()).onCancel()
+  section(h.render()).onRemove('memory', 'first synthetic entry', 0)
+  assert.match(text(sectionView(h.render())), /Delete this memory entry\?/)
+  assert.ok(button(sectionView(h.render()), 'Confirm delete'))
+  assert.deepEqual(untranslated(), [])
+  section(h.render()).onCancelRemove()
+  section(h.render()).onDraft('kept synthetic draft')
+  locale.switchTo('zh-CN')
+  tree = h.render()
+  assert.ok(button(tree, '刷新'))
+  assert.match(text(tree), /后台复盘 · 每 10 轮用户对话 · 最近复盘已完成/)
+  assert.equal(section(tree).draft, 'kept synthetic draft')
+  locale.switchTo('fr')
+  assert.ok(button(h.render(), 'Refresh'), 'languages without a panel dictionary use English, like DSH')
+  assert.equal(locale.listeners.size, 1)
+  h.dispose()
+  assert.equal(locale.listeners.size, 0)
+})
+
+test('static: English recovery text names the action for expired logins and stale drafts', async () => {
+  const expired = fixture(async () => response({ error: 'synthetic expired session' }, 401), false, { locale: localeService('en') })
+  expired.show()
+  await tick()
+  let tree = expired.render()
+  assert.match(text(tree), /Your login has expired\. Sign in again, then reload this page \(synthetic expired session\)/)
+  assert.match(text(tree), /Memory is not loaded\. Follow the message above to restore access/)
+  assert.equal(walk(tree, node => node.type === 'button' && /Refresh|Retry/.test(text(node))).length, 0)
+  assert.deepEqual(visibleStrings(tree).filter(value => HAN.test(value)), [])
+  expired.dispose()
+
+  let writes = 0
+  const h = fixture(async (_path, init) => JSON.parse(init.body).action === 'list'
+    ? response({ ...list(), entryVersions: { memory: ['v:old'], user: [] } })
+    : (++writes, response({ success: false, code: 'row_conflict', conflict: true, error: 'synthetic row conflict' }, 409)),
+  false, { locale: localeService('en-GB') })
+  h.show()
+  await tick()
+  section(h.render()).onEdit({ bank: 'memory', index: 0, original: 'synthetic entry', text: 'conflicting draft' })
+  section(h.render()).onSave()
+  await tick()
+  const view = sectionView(h.render())
+  assert.match(text(view), /Save failed: The entry changed, was recreated, or its version is out of date\. Check the latest list, then start editing again \(synthetic row conflict\)\. Your draft is kept\./)
+  assert.match(text(view), /out of date, so Save is disabled/)
+  assert.equal(button(view, 'Save').props.disabled, true)
+  await section(h.render()).onCopy()
+  assert.equal(h.copied[0], 'conflicting draft')
+  assert.match(text(sectionView(h.render())), /Draft copied\. Click Cancel, refresh the list/)
+  assert.equal(writes, 1)
+  h.dispose()
+})
+
+test('dynamic: follows the DSH locale for statistics and recovery labels; English without a locale service', async () => {
+  const locale = localeService('zh')
+  let attempt = 0
+  const h = fixture(async () => ++attempt === 1 ? stats(1) : { ready: false, code: 'unauthorized', error: 'synthetic expired session' }, true, { locale })
+  h.render()
+  await tick()
+  assert.match(text(h.render()), /🧠 Hermes 记忆/)
+  assert.match(text(h.render()), /MEMORY\.md 1 条/)
+  button(h.render(), '刷新').props.onClick()
+  await tick()
+  assert.match(text(h.render()), /登录已过期/)
+  assert.equal(walk(h.render(), node => node.type === 'button').length, 0)
+  locale.switchTo('en')
+  assert.match(text(h.render()), /Your login has expired/)
+  assert.match(text(h.render()), /MEMORY\.md 1 entry ·/)
+  h.dispose()
+  assert.equal(locale.listeners.size, 0)
+  const fallback = fixture(async () => stats(2), true)
+  fallback.render()
+  await tick()
+  assert.match(text(fallback.render()), /🧠 Hermes Memory.*MEMORY\.md 2 entries/)
+  fallback.dispose()
+})
+
+test('real Cordis: the locale service is optional, may arrive after the panel, and is released on unload', async () => {
+  const require = createRequire(import.meta.url)
+  const { Context } = require('@deepseek-ai/cordis')
+  const runner = hooks(), doc = documentStub(), entries = new Map()
+  const slots = {
+    register(options, component) { const key = options.id || options.key; entries.set(key, component); return () => entries.delete(key) },
+    inject(_slot, effect) { return effect() },
+  }
+  let plugin
+  vm.runInNewContext(source, {
+    window: { __ModuleLoader__: { load(registration) { plugin = registration.factory(() => runner.React) } } },
+    document: doc, fetch: async () => response(list()),
+  })
+  const ctx = new Context()
+  const slotsFiber = ctx.plugin({ apply(c) { c.provide('slots', slots) } })
+  await slotsFiber
+  const panelFiber = ctx.plugin(plugin)
+  await panelFiber
+  const render = () => runner.render('view', entries.get('hermes-memory-panel'), tree => doc.commit('view', tree))
+  render()
+  runner.render('entry', entries.get('hermes-memory')).props.onClick()
+  render()
+  await tick()
+  assert.ok(button(render(), '刷新'), 'no locale service keeps the original Chinese panel')
+  const locale = localeService('en')
+  const localeFiber = ctx.plugin({ apply(c) { c.provide('locale', locale) } })
+  await localeFiber
+  await tick()
+  assert.ok(button(render(), 'Refresh'), 'a locale service provided later is still followed')
+  locale.switchTo('zh-TW')
+  assert.ok(button(render(), '刷新'))
+  assert.equal(locale.listeners.size, 1)
+  await localeFiber.dispose()
+  assert.equal(locale.listeners.size, 0, 'unloading the locale service releases the subscription')
+  assert.ok(button(render(), '刷新'), 'the last language stays in place without the service')
+  await panelFiber.dispose()
+  await slotsFiber.dispose()
 })
 
 const checkout = process.env.DSH_CLIENT_TEST_CHECKOUT
