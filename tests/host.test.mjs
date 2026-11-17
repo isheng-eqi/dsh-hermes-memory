@@ -918,3 +918,34 @@ test('static: route override discards route-specific controls, same route retain
   assert.equal(failedLlm.requests.length, 0)
   assert.match(failed.runtime().global.reviews['session:session-test'].error, /Session flush failed/)
 })
+
+test('static: review persists usage and toolCalls, clears stop on route override, and excludes plugin snapshots from evidence', async t => {
+  const llm = scriptedLlm([
+    async function *() {
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: 'call-1', name: 'memory', arguments: JSON.stringify({ target: 'memory', operations: [{ action: 'add', content: 'Review fact' }] }) } }
+      yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 } }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+    },
+    async function *() {
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Saved.' } }
+      yield { type: 'usage', usage: { inputTokens: 50, outputTokens: 10, totalTokens: 60 } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  ])
+  const h = await mount(t, 'static', { llm, config: { backgroundReview: { interval: 1, provider: 'override', model: 'target' } } })
+  h.session.requestHeader = () => ({ config: { provider: 'parent', model: 'source', stop: ['</tool>'] } })
+  const originalDerive = h.session.deriveMessages.bind(h.session)
+  h.session.deriveMessages = () => [
+    { role: 'user', source: { kind: 'plugin:dsh-hermes-memory' }, content: [{ type: 'text', text: '<hermes-memory-snapshot>stale</hermes-memory-snapshot>' }] },
+    ...originalDerive(),
+  ]
+  await completeTurn(h, 1)
+  assert.equal(llm.requests[0].stop, undefined)
+  assert.doesNotMatch(llm.requests[0].messages[0].content[0].text, /hermes-memory-snapshot/)
+  const record = h.runtime().global.reviews['session:session-test']
+  assert.equal(record.toolCalls, 1)
+  assert.deepEqual(record.usage, { inputTokens: 150, outputTokens: 30, totalTokens: 180 })
+  const stats = await h.request('/hermes-memory/stats', { method: 'GET' })
+  assert.equal(stats.value.backgroundReview.toolCalls, 1)
+  assert.deepEqual(stats.value.backgroundReview.usage, { inputTokens: 150, outputTokens: 30, totalTokens: 180 })
+})

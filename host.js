@@ -677,17 +677,19 @@ function createReviewScheduler({ ctx, projection, settings, enabledBanks, claimR
       || state.userTurnCount === 0 || state.userTurnCount % settings.interval !== 0) return
     const sessionId = String(session.id)
     const turn = event.data.turn
+    // One job per session. Later concurrent turns are skipped, never replayed on reload.
+    if (active.has(sessionId)) return
     // Capture the exact admitted conversation before another turn can append.
     let captured
     try {
       const parent = session.requestHeader()?.config
       const config = parent ? { ...parent } : null
       if (config && settings.provider && settings.model) {
-        if (config.provider !== settings.provider || config.model !== settings.model) { delete config.reasoningEffort; delete config.maxTokens }
+        if (config.provider !== settings.provider || config.model !== settings.model) { delete config.reasoningEffort; delete config.maxTokens; delete config.stop }
         config.provider = settings.provider; config.model = settings.model
       }
       const messages = session.deriveMessages()
-      const transcript = messages.filter(message => ['user', 'assistant', 'tool'].includes(message.role))
+      const transcript = messages.filter(message => ['user', 'assistant', 'tool'].includes(message.role) && !String(message.source?.kind || '').startsWith('plugin:'))
         .map(message => ({ role: message.role, source: message.source?.kind || null,
           content: (message.content || []).filter(block => block.type === 'text').map(block => block.text).join('\n') }))
         .filter(message => message.content)
@@ -701,8 +703,6 @@ function createReviewScheduler({ ctx, projection, settings, enabledBanks, claimR
         },
       }
     } catch (error) { last = { status: 'unavailable', error: String(error.message || error) }; return }
-    // One job per session. Later concurrent turns are skipped, never replayed on reload.
-    if (active.has(sessionId)) return
     const controller = new AbortController()
     active.set(sessionId, controller)
     const task = Promise.resolve().then(async () => {
@@ -734,7 +734,9 @@ function createReviewScheduler({ ctx, projection, settings, enabledBanks, claimR
           executeMemory: args => executeMemory(args, captured.provenance, controller.signal), readMemory,
           signal: controller.signal, maxIterations: settings.maxIterations, sessionId,
         })
-        last = { status: controller.signal.aborted ? 'interrupted' : result.status, error: result.error ? String(result.error.message || result.error) : null }
+        const usage = result.usage && Object.keys(result.usage).length ? result.usage : undefined
+        last = { status: controller.signal.aborted ? 'interrupted' : result.status, error: result.error ? String(result.error.message || result.error) : null,
+          ...(usage ? { usage } : {}), ...(Number.isSafeInteger(result.toolCalls) ? { toolCalls: result.toolCalls } : {}) }
         await finishReview(sessionId, turn, { ...result, status: last.status, error: last.error })
       } catch (error) {
         last = { status: controller.signal.aborted ? 'interrupted' : 'failed', error: String(error.message || error) }
@@ -828,13 +830,13 @@ function compactRuntime(data, { before, maxDetailed = 100, now = new Date().toIS
   if (!Number.isSafeInteger(maxDetailed) || maxDetailed < 0 || maxDetailed > 10000) throw new Error('maxDetailed must be an integer from 0 to 10000')
   const result = copy(data), counts = { pending: 0, reviews: 0 }
   for (const collection of ['pending', 'reviews']) {
-    const terminal = collection === 'pending' ? ['approved', 'discarded'] : ['completed', 'error', 'failed', 'cancelled', 'max-iterations', 'interrupted']
+    const terminal = collection === 'pending' ? ['approved', 'discarded'] : ['completed', 'error', 'failed', 'cancelled', 'max-iterations', 'interrupted', 'unavailable']
     const detailed = Object.entries(data[collection]).filter(([, row]) => !row.compacted && terminal.includes(row.status) && isoTime(row.finishedAt))
       .sort(([a, x], [b, y]) => Date.parse(y.finishedAt) - Date.parse(x.finishedAt) || a.localeCompare(b))
     for (const [key, row] of detailed.slice(maxDetailed)) {
       if (Date.parse(row.finishedAt) >= Date.parse(before)) continue
       const marker = { compacted: true, compactedAt: now, payloadSha256: payloadSha256(row) }
-      for (const name of ['id', 'target', 'sessionId', 'turn', 'status', 'createdAt', 'startedAt', 'finishedAt', 'iterations', 'writes', 'pending', 'toolCalls']) {
+      for (const name of ['id', 'target', 'sessionId', 'turn', 'status', 'createdAt', 'startedAt', 'finishedAt', 'iterations', 'writes', 'pending', 'toolCalls', 'usage']) {
         if (row[name] !== undefined) marker[name] = copy(row[name])
       }
       if (collection === 'pending') marker.pinnedIdentities = (row.pins || row.pinnedIdentities || []).map(({ operation, seq, staged }) => staged === true ? { operation, staged: true } : { operation, seq })
@@ -1095,8 +1097,13 @@ async function apply(ctx, config) {
     const key = 'session:' + sessionId
     if (runtime.data.reviews[key]?.turn !== turn) return
     const data = cloneJson(runtime.data)
+    const usage = result.usage && typeof result.usage === 'object'
+      ? Object.fromEntries(Object.entries(result.usage).filter(([name, value]) => ['inputTokens', 'outputTokens', 'totalTokens'].includes(name) && Number.isFinite(value)))
+      : {}
     data.reviews[key] = { ...data.reviews[key], status: result.status || 'completed', finishedAt: new Date().toISOString(),
       iterations: result.iterations || 0, writes: result.writes || 0, pending: result.pending || 0,
+      ...(Number.isSafeInteger(result.toolCalls) ? { toolCalls: result.toolCalls } : {}),
+      ...(Object.keys(usage).length ? { usage } : {}),
       error: result.error ? String(result.error).slice(0, 500) : null }
     await saveRuntime(data)
   })
