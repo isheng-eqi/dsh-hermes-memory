@@ -95,10 +95,10 @@ function normalizeMemoryCall(args, enabledBanks = ['memory', 'user']) {
     }
     const content = source.content || source.new_text || source.newText
     const oldText = source.old_text ?? source.oldText
+    if (source.matched_entry !== undefined) return invalid(`Operation ${index + 1}: matched_entry is not a supported parameter.`)
     const operation = { action: source.action }
     if (content !== undefined) operation.content = content
     if (oldText !== undefined) operation.oldText = oldText
-    if (source.matched_entry !== undefined) operation.matched_entry = source.matched_entry
     const problem = validateOperation(operation)
     if (problem) return invalid(`Operation ${index + 1}: ${problem} Nothing was written or staged.`)
     if (source.action === 'add') operation.content = operation.content.trim()
@@ -156,7 +156,7 @@ function findEntryMatches(entries, oldText) {
  * consolidation 文案）。
  */
 function consolidationFailure(failures, max, bank, response, sessionId) {
-  if (sessionId === 'ui') return response
+  if (sessionId === 'ui' || sessionId === 'approval') return response
   const count = (failures.get(sessionId) || 0) + 1
   failures.set(sessionId, count)
   if (count <= max) return response
@@ -1251,15 +1251,23 @@ async function apply(ctx, config) {
     const pins = []
     for (let i = 0; i < operations.length; i++) {
       const op = operations[i]
+      let stepOp = op
       if (op.action !== 'add') {
         const needle = op.oldText ?? op.old_text
         const matched = findEntryMatches(working, needle).map(match => match.entry)
+        if (op.matched_entry !== undefined && (!matched.length || new Set(matched.map(record => record.text)).size !== 1 || op.matched_entry !== matched[0].text)) {
+          return consolidationFailure(failures, MAX_CONSOLIDATION_FAILURES, bank, {
+            success: false, target: bank, error: `Operation ${i + 1} (${op.action}): matched_entry does not match resolved old_text. No operations were applied (batch is all-or-nothing).`,
+            currentEntries: entriesOf(bank), usage: usageLine(bank),
+          }, sessionId)
+        }
         if (matched.length && new Set(matched.map(record => record.text)).size === 1) {
           const entry = matched[0]
           pins.push({ operation: i, ...(recs.some(record => record.seq === entry.seq) ? { seq: entry.seq } : { staged: true }), matched_entry: entry.text })
+          if (!options.exactEntry) stepOp = { ...op, matched_entry: entry.text }
         }
       }
-      const failure = stepOperation(working, op, `Operation ${i + 1} (${op.action})`, seqCounter, options.exactEntry)
+      const failure = stepOperation(working, stepOp, `Operation ${i + 1} (${op.action})`, seqCounter, options.exactEntry)
       if (failure !== null) {
         return consolidationFailure(failures, MAX_CONSOLIDATION_FAILURES, bank, {
           success: false,
@@ -1304,9 +1312,11 @@ async function apply(ctx, config) {
     if (options.approvalId && JSON.stringify(pins) !== JSON.stringify(options.pins)) {
       return { success: false, target: bank, error: 'Pending proposal is stale: its whole matched entry changed' }
     }
+    if (options.signal?.aborted) throw new Error('Memory write was cancelled')
     const stage = !options.owner && !options.approvalId && (config.writeApproval === true || options.background && operations.some(op => op.action !== 'add'))
     if (tasks.length && stage) {
       await ensureRuntime()
+      if (options.signal?.aborted) throw new Error('Memory write was cancelled')
       const data = cloneJson(runtime.data)
       const id = 'proposal-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10)
       data.pending[id] = { id, target: bank, operations: cloneJson(operations), pins,

@@ -634,6 +634,38 @@ test('static: typography-matched removal pins the whole original entry and refus
   assert.deepEqual((await h.call('memory_list')).memory, ['User uses “Windows”. Extra current fact.'])
 })
 
+test('static: approval pins and mutation targets share one resolved entry, and owner approvals never trigger model lockout', async t => {
+  const llm = scriptedLlm([
+    memoryToolCall('remove-mismatch', 'memory', [{ action: 'remove', old_text: 'Anchor', matched_entry: 'Victim' }]),
+    'Stopped.',
+  ])
+  const h = await mount(t, 'static', { llm, config: { backgroundReview: { interval: 1 } } })
+  await h.call('memory', { action: 'add', content: 'Anchor' })
+  await h.call('memory', { action: 'add', content: 'Victim' })
+  await completeTurn(h, 1)
+  assert.equal((await h.call('memory_pending', { action: 'list' })).pending.length, 0)
+  assert.deepEqual((await h.call('memory_list')).memory, ['Anchor', 'Victim'])
+  const seeded = {
+    format: 1,
+    pending: {
+      'proposal-mismatch': {
+        id: 'proposal-mismatch', target: 'memory', status: 'pending',
+        operations: [{ action: 'remove', old_text: 'Anchor', matched_entry: 'Victim' }],
+        pins: [{ operation: 0, seq: 1, matched_entry: 'Anchor' }],
+      },
+    },
+    reviews: {},
+  }
+  const restored = await mount(t, 'static', { snapshot: h.snapshot(), runtime: seeded })
+  for (let i = 0; i < 4; i++) {
+    const out = await restored.request('/hermes-memory/pending', { body: { action: 'approve', id: 'proposal-mismatch' } })
+    assert.equal(out.value.success, false)
+    assert.doesNotMatch(out.value.error, /Stop retrying memory calls/)
+    assert.match(out.value.error, /matched_entry does not match/)
+  }
+  assert.deepEqual((await restored.call('memory_list')).memory, ['Anchor', 'Victim'])
+})
+
 test('static: all-writes approval persists across restart, owner UI bypasses it, and orphan recovery preserves uncertainty', async t => {
   const h = await mount(t, 'static', { config: { writeApproval: true } })
   const staged = await h.call('memory', { action: 'add', content: 'Needs owner approval' })
