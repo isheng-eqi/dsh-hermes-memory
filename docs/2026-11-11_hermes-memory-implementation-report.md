@@ -66,7 +66,7 @@ $env:HERMES_SMOKE_ITERATIONS='2'
 node scripts/live-review-smoke.mjs
 ```
 
-本次运行的适配器使用统计为 inputTokens=5366、outputTokens=100、cacheReadTokens=5120、totalTokens=10586。保留适配器原始口径，不将缓存统计简单相加当作实际收费。主 guidance 为 964 个码点，后台 review 提示为 1497 个码点；字符数不是 token 数。
+本次运行的适配器使用统计为 inputTokens=5366、outputTokens=100、cacheReadTokens=5120、totalTokens=10586。保留适配器原始口径，不将缓存统计简单相加当作实际收费。主 guidance 为 964 个码点，后台 review 提示为 1477 个码点（复盘请求系统提示同时包含主 guidance、复盘提示与当前启用记忆库，空库时共 2542 个码点）；字符数不是 token 数。
 
 ## 当前环境与数据边界
 

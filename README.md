@@ -26,11 +26,15 @@ dsh plugin --profile web add dsh-hermes-memory
 
 已在 DSH `0.2.2-alpha.2`、Node `24.22.2` 的当前 v4 会话格式验证。包的 peer 范围不是运行兼容性保证。
 
+![记忆面板，使用离线合成条目展示双库、存储状态和操作按钮](docs/panel.png)
+
+面板目前使用简体中文；英文 README 介绍使用方式，完整界面翻译欢迎另行贡献。面板支持 Esc 关闭、Tab 焦点循环与关闭后返回入口，条目按钮有各自的无障碍名称。
+
 ### 观察自动记忆
 
 1. 在正常对话中明确表达长期事实，例如「以后都用中文与我交流」。一次性的任务要求不会自动变成长期偏好。
 2. 主模型可随时主动保存；默认在真实用户回合计数达到 10 的整数倍、且本轮正常完成时触发后台复盘。工具调用和自动继续消息不推进用户回合计数。
-3. 打开「记忆」面板刷新数据，查看后台状态、双库内容和待审修改。后台新增可直接保存，旧条目的修改与删除需要审核。
+3. 打开「记忆」面板刷新数据，查看后台状态、双库内容和待审修改。默认情况下后台新增可直接保存（开启 `writeApproval: true` 时也进入待审队列），旧条目的修改与删除需要审核。
 4. 当前会话保持首次读取的冻结快照。新会话会读取更新后的记忆；需要读取即时状态可调用 `memory_list`。
 
 真实用户消息每轮最多计数一次。触发还要求本轮有真实用户消息、成功结束，以及非空且不含工具调用的最终答复。取消、异常、空答复、含未完成工具调用的答复不触发自动复盘；这些回合已经收到的真实用户消息仍计入周期。普通子代理不触发自动复盘。同一会话只运行一个后台复盘；运行期间遇到的后续触发会跳过，不排队补跑。
@@ -186,11 +190,11 @@ global: { format: 2, tables: { memory, user }, seqHighWater: { memory, user } }
 | `/hermes-memory/export` | GET | 下载当前条目、完整账簿和独立 v1 文档 |
 | `/hermes-memory/compact` | POST | 按 `before` 与 `maxDetailed` 压缩已结束历史详情，保留防重放标记 |
 
-`ops` 的 `list` 保持 `memory` / `user` 字符串数组，并额外返回同序的 `entryVersions.memory` / `entryVersions.user`。新版官方面板在开始编辑或删除时捕获对应令牌，随 `replace` / `remove` 发送 `expectedVersion`；服务端在写队列内同时核对完整 `oldText` 和行版本。冲突返回 HTTP 409，保留草稿供核对；其他行的修改不会使当前未变化条目的令牌失效。条目改后改回、删后同文重建或插件重载都会使旧令牌失效，无需新增持久化格式。
+`ops` 的 `list` 保持 `memory` / `user` 字符串数组，并额外返回同序的 `entryVersions.memory` / `entryVersions.user`。新版官方面板在开始编辑或删除时捕获对应令牌，随 `replace` / `remove` 发送 `expectedVersion`；服务端在写队列内同时核对完整 `oldText` 和行版本。即使两条记录文字完全相同，也会用各自的令牌定位选中的那一条。冲突返回 HTTP 409 和 `code: "row_conflict"`，保留本地草稿供复制或核对，并停止重复提交过期版本；刷新查看最新列表，取消后重新开始编辑或删除。普通刷新不会自动给旧草稿换新令牌。其他行的修改不会使当前未变化条目的令牌失效。条目改后改回、删后同文重建或插件重载都会使旧令牌失效，无需新增持久化格式。
 
 旧 HTTP 调用不传 `expectedVersion` 时仍保留完整旧文本检查，但没有上述 ABA 保护。该协议不覆盖 agent 工具或待审提案；`patch` / `batch` 也不支持此令牌，携带 `expectedVersion` 会返回 400。令牌捕获示例与完整边界见[面板行版本协议](docs/storage-safety.md#protect-panel-edits-with-row-versions)。
 
-401 要重新通过 DSH 登录入口打开网页；503 表示认证或存储服务不可用。操作失败会保留草稿、最后成功快照及待审提案，不显示虚假的空库或保存成功。
+面板持续显示 `storageSafety` 存储状态。401 / 403 会提示从 DSH 登录入口重新打开；存储或运行时结果不明（`storage_reload_required` / `runtime_reload_required`）会停止写入并提示重载插件、核对存储，不能靠重复「载入」恢复。确实可重试的服务暂不可用仍提供重试；错误响应也带稳定 `code` 和当前存储状态。操作失败会保留本地草稿、最后成功快照及待审提案；本地草稿保留不代表已经写入存储。恢复边界见[存储保护与维护](docs/storage-safety.md#respond-to-panel-errors)。
 
 ## 对照范围
 
@@ -212,7 +216,7 @@ global: { format: 2, tables: { memory, user }, seqHighWater: { memory, user } }
 
 ## 开发与验证
 
-源码分为纯规则、提示词、后台模型循环、调度与宿主集成。`host.js` 由这些模块生成，禁止手工维护另一份实现。
+源码分为纯规则、提示词、后台模型循环、调度与宿主集成。`host.js` 由这些模块生成，禁止手工维护另一份实现。参与开发请先读[贡献指南](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/CONTRIBUTING.md)，代理另读[代理贡献指引](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/AGENTS.md)。
 
 ```sh
 npm run build:host
@@ -237,7 +241,7 @@ node --test tests/*.test.mjs
 - [合成记忆质量评分器](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/eval/memory-quality/README.md)：对已有输出评分，评分器回归通过不代表模型质量达标。
 - [合成资源特征测量](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/docs/resource-characterization.md)：观察调度、复盘、存储调用及卸载；200 万 UTF-16 单元上限只覆盖全部阶段累计用户证据，不是完整请求或生产资源上限。
 
-主对话新增 guidance 964 个 Unicode 字符；memory 工具说明与参数相较旧版约增加 51 字符。后台专用 review 提示 1477 字符，仅在复盘请求中发送。这是字符计数，实际 token 与费用取决于模型 tokenizer、对话长度及请求次数。
+主对话新增 guidance 964 个 Unicode 字符；memory 工具说明与参数相较旧版约增加 51 字符。后台专用 review 提示 1477 字符，仅在复盘请求中发送（每次复盘请求的系统提示同时包含主 guidance、后台专用提示与当前启用的记忆库内容，空库时基础系统提示共 2542 个字符；由于当前记忆库已包含在系统提示中，无新增时通常仅需 1 次模型请求，单库写入通常需要 2 次请求，16 次为重试与多步工具循环上限）。这是字符计数，实际 token 与费用取决于模型 tokenizer、对话长度及请求次数。
 
 ## License
 

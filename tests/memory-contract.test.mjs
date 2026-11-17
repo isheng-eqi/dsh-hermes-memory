@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import {
   normalizeMemoryCall, validateFinalBatch, stepOperation, validateOperation,
-  normalizeForMatch,
+  normalizeForMatch, consolidationFailure,
 } from '../lib/core.js'
 import {
   UPSTREAM_COMMIT, MEMORY_GUIDANCE, MEMORY_REVIEW_PROMPT,
@@ -40,6 +40,12 @@ test('invalid arguments are rejected before applying a batch', () => {
   assert.equal(normalizeMemoryCall({ target: 'memory', operations: [] }).success, false)
   assert.equal(normalizeMemoryCall({ target: 'memory', operations: [], action: 'add', content: 'x' }).success, true)
   assert.equal(normalizeMemoryCall({ target: 'memory', operations: [{ action: 'add', content: 'x' }, { action: 'unknown' }] }).success, false)
+  assert.match(normalizeMemoryCall({ target: 'memory', operations: [{ action: 'remove', old_text: 'x', matched_entry: 'y' }] }).error, /matched_entry is not a supported parameter/)
+  const failures = new Map()
+  for (let i = 0; i < 5; i++) {
+    assert.equal(consolidationFailure(failures, 3, 'memory', { success: false, error: 'raw error' }, 'ui').error, 'raw error')
+    assert.equal(consolidationFailure(failures, 3, 'memory', { success: false, error: 'raw error' }, 'approval').error, 'raw error')
+  }
 })
 
 test('patch preserves exact span whitespace and entry metadata', () => {

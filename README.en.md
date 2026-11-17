@@ -16,7 +16,7 @@ The implementation is based on Hermes commit `c0c4357744d1a6994d332b826aea4c77fc
 
 ## Install and use
 
-Install or enable the bundle in the DSH plugin manager, refresh the existing DSH page, and click **Memory** at the bottom of the sidebar. A source installation uses the package directory. For the published package:
+Install or enable the bundle in the DSH plugin manager, refresh the existing DSH page, and click **记忆** (Memory) at the bottom of the sidebar. A source installation uses the package directory. For the published package:
 
 ```sh
 dsh plugin --profile web add dsh-hermes-memory
@@ -26,11 +26,15 @@ The plugin requires `tools`, `timer`, `sessionProjections`, and a JSON storage b
 
 The implementation verification record covers DSH `0.2.2-alpha.2`, Node `24.22.2`, and the current v4 session format. The package's peer dependency ranges do not guarantee runtime compatibility with every matching version.
 
+![Memory panel showing synthetic offline entries, storage status, and row actions](docs/panel.png)
+
+The panel currently uses Simplified Chinese; this English README explains its controls. A complete interface translation is welcome as a separate contribution. The panel supports Escape to close, trapped Tab navigation, focus restoration to its opener, and entry-specific accessible action names.
+
 ### Observe automatic memory
 
 1. State a durable fact during a normal conversation, such as “Use Chinese for all future conversations.” A one-off task requirement does not automatically become a lasting preference.
 2. The main model can save memory at any time. By default, background review also runs when the genuine user-turn count reaches a multiple of 10 and that turn completes normally. Tool calls and automatic continuation messages do not advance the user-turn count.
-3. Refresh the Memory panel to inspect background status, both banks, and pending changes. Background additions can be saved directly; changes to existing entries and deletions require approval.
+3. Refresh the Memory panel to inspect background status, both banks, and pending changes. By default, background additions can be saved directly (when `writeApproval: true` is enabled, background additions are also staged as pending proposals); changes to existing entries and deletions always require approval.
 4. The current session retains the frozen snapshot captured on its first read. New sessions receive updated memory. Use `memory_list` to read the current store during an existing session.
 
 A turn counts at most one genuine user message. A review also requires a genuine user message in the triggering turn, successful turn completion, and a nonempty final text response without tool calls. Cancelled or failed turns, empty responses, and responses with unfinished tool calls do not trigger review; any genuine user message already received in those turns still counts toward the interval. Ordinary subagents do not trigger automatic review. Only one review runs per session at a time; later triggers encountered while it is running are skipped rather than queued for replay.
@@ -170,7 +174,7 @@ Stop every existing writer and back up both files before switching. `storageRoot
 
 ### Compact history and export a downgrade copy
 
-The Memory panel provides **Export backup** and **Compact history details**. Export separates current bank entries, complete storage bookkeeping, and a derived v1 JSON document containing the current entries. It includes disabled banks for the authenticated owner and never installs a downgrade. The [offline maintenance command](docs/storage-safety.md#offline-maintenance-and-downgrade) can also export, compact after making a new backup, or extract the v1 document.
+The Memory panel (`记忆`) provides **导出备份** (Export backup) and **压缩历史详情** (Compact history details). Export separates current bank entries, complete storage bookkeeping, and a derived v1 JSON document containing the current entries. It includes disabled banks for the authenticated owner and never installs a downgrade. The [offline maintenance command](docs/storage-safety.md#offline-maintenance-and-downgrade) can also export, compact after making a new backup, or extract the v1 document.
 
 Compaction drops old resolved proposal/review payloads while preserving identities, SHA-256 audit hashes, statuses, and per-session claimed-turn high-water marks. Pending, applying, and interrupted approvals retain their full evidence. The panel uses a 30-day cutoff and keeps the newest 100 detailed resolved rows in each collection. Newer rows and unresolved records are also retained. API/CLI callers can select the cutoff and detailed-history allowance.
 
@@ -186,11 +190,11 @@ The panel API uses DSH owner authentication and Host/Origin checks. Responses di
 | `/hermes-memory/export` | GET | Download current entries, full bookkeeping, and a separate v1 document |
 | `/hermes-memory/compact` | POST | Compact resolved details using `before` and `maxDetailed`, retaining replay markers |
 
-An `ops` `list` response retains the `memory` / `user` string arrays and adds aligned `entryVersions.memory` / `entryVersions.user` arrays. The updated official panel captures the row token when an edit or deletion starts and sends it as `expectedVersion` with `replace` / `remove`. Inside the write queue, the server checks both the complete `oldText` and row version. A conflict returns HTTP 409 and preserves the draft for inspection. Changing a different row does not invalidate an unchanged entry's token. Changing the entry back, deleting and recreating identical text, or reloading the plugin invalidates an old token without adding a persisted format.
+An `ops` `list` response retains the `memory` / `user` string arrays and adds aligned `entryVersions.memory` / `entryVersions.user` arrays. The updated official panel captures the row token when an edit or deletion starts and sends it as `expectedVersion` with `replace` / `remove`. Inside the write queue, the server checks both the complete `oldText` and row version. Even identical-text records can be selected independently through their distinct tokens. A conflict returns HTTP 409 with `code: "row_conflict"`, retains the local draft for inspection or copying, and prevents repeated submission of the stale version. Refresh to inspect the latest list, then cancel and start a new edit or deletion. An ordinary refresh does not attach a fresh token to an old draft. Changing a different row does not invalidate an unchanged entry's token. Changing the entry back, deleting and recreating identical text, or reloading the plugin invalidates an old token without adding a persisted format.
 
 Older HTTP calls without `expectedVersion` retain full-old-text checks but lack this ABA protection. The protocol does not cover agent tools or pending approvals. `patch` / `batch` do not support the token and return 400 if `expectedVersion` is supplied. See [Protect panel edits with row versions](docs/storage-safety.md#protect-panel-edits-with-row-versions) for token capture and the full boundary.
 
-For HTTP 401, reopen the page through the DSH login entry. HTTP 503 indicates that authentication or storage services are unavailable. Failed panel operations preserve drafts, the last successful snapshot, and pending proposals instead of displaying an empty store or a false success state.
+The panel keeps `storageSafety` visible. For HTTP 401 / 403, reopen through the DSH login entry. Unknown storage or runtime outcomes (`storage_reload_required` / `runtime_reload_required`) stop writes and require reloading the plugin and inspecting storage; repeated list retries cannot recover them. Retry remains available for retryable service unavailability. Error responses also carry a stable `code` and current storage status. Failed operations preserve the local draft, last successful snapshot, and pending proposals; a retained local draft has not been saved to storage. See [Respond to panel errors](docs/storage-safety.md#respond-to-panel-errors).
 
 ## Scope of the adaptation
 
@@ -212,7 +216,7 @@ The [2.0.0 implementation and verification record](docs/2026-11-11_hermes-memory
 
 ## Develop and verify
 
-The source separates pure rules, prompts, the background model loop, scheduling, and host integration. `host.js` is generated from those modules; do not maintain a second implementation by hand.
+The source separates pure rules, prompts, the background model loop, scheduling, and host integration. `host.js` is generated from those modules; do not maintain a second implementation by hand. Read the [contribution guide](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/CONTRIBUTING.md) before contributing; agents should also read the [agent guidance](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/AGENTS.md).
 
 ```sh
 npm run build:host
@@ -237,7 +241,7 @@ Run these development tools from a source checkout of this repository; they are 
 - [Synthetic memory quality scorer](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/eval/memory-quality/README.md): scores existing outputs; scorer regression success does not establish model quality.
 - [Synthetic resource characterization](https://github.com/isheng-eqi/dsh-hermes-memory/blob/main/docs/resource-characterization.md): observes scheduler, review, storage calls and disposal. Its two-million UTF-16-unit cap covers cumulative user evidence across phases, not complete requests or production resource limits.
 
-The main-chat guidance contains 964 Unicode code points. The memory tool description and parameters add approximately 51 characters compared with the previous version. The background-specific review prompt contains 1477 code points and is sent only in review requests. These are character counts; actual token usage and cost depend on the model tokenizer, conversation length, and request count.
+The main-chat guidance contains 964 Unicode code points. The memory tool description and parameters add approximately 51 characters compared with the previous version. The background-specific review prompt contains 1477 code points and is sent only in review requests; each review request system prompt combines the main-chat guidance, the background review prompt, framing text, and the current enabled memory banks (2542 code points with empty banks). In normal operation, a background review makes 1 model request when nothing is worth saving or 2 requests when applying a single-bank update; 16 is the retry/loop ceiling. These are character counts; actual token usage and cost depend on the model tokenizer, conversation length, and request count.
 
 ## License
 
