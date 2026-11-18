@@ -1029,6 +1029,78 @@ test('real Cordis: the locale service is optional, may arrive after the panel, a
   await slotsFiber.dispose()
 })
 
+test('static: the collapsed 56px rail shows a compact entry instead of a clipped localized word', async () => {
+  const runner = hooks(), doc = documentStub(), entries = new Map()
+  const slots = {
+    register(options, component) { const key = options.id || options.key; entries.set(key, component); return () => entries.delete(key) },
+    inject(_slot, fn) { return fn() },
+  }
+  const locale = localeService('en')
+  let plugin
+  vm.runInNewContext(source, {
+    window: { __ModuleLoader__: { load(registration) { plugin = registration.factory(() => runner.React) } } },
+    document: doc, fetch: async () => response(list()), navigator: { clipboard: { async writeText() {} } },
+  })
+  plugin.apply({
+    get: name => name === 'slots' ? slots : name === 'locale' ? locale : undefined,
+    effect: fn => fn(),
+    inject: (_deps, fn) => fn({ get: name => name === 'locale' ? locale : undefined, effect: fn2 => fn2() }),
+  })
+  const entry = (props) => runner.render('entry', () => entries.get('hermes-memory')(props), tree => doc.commit('entry', tree))
+  // The owner share reports the 56px rail; a localized word cannot fit there.
+  const rail = entry({ wide: false })
+  assert.equal(text(rail), '🧠')
+  assert.equal(rail.props['aria-label'], 'Open memory panel')
+  assert.equal(rail.props.title, 'Memory')
+  assert.equal(rail.props.style.letterSpacing, 0)
+  assert.equal(rail.props.style.maxWidth, '100%')
+  assert.equal(rail.props.style.overflow, 'hidden')
+  // Wide, and hosts that do not supply the owner share, keep the localized word.
+  assert.equal(text(entry({ wide: true })), 'Memory')
+  assert.equal(text(entry({})), 'Memory')
+  locale.switchTo('zh-CN')
+  assert.equal(text(entry({ wide: true })), '记忆')
+  assert.equal(entry({ wide: false }).props['aria-label'], '打开记忆面板')
+  assert.equal(text(entry({ wide: false })), '🧠')
+})
+
+test('real Cordis: the dynamic card follows a locale service provided after the plugin and releases it', async () => {
+  const require = createRequire(import.meta.url)
+  const { Context } = require('@deepseek-ai/cordis')
+  const runner = hooks(), entries = new Map()
+  const slots = {
+    register(options, component) { const key = options.id || options.key; entries.set(key, component); return () => entries.delete(key) },
+    inject(_slot, fn) { return fn() },
+  }
+  const plugin = vm.runInNewContext(`(function () { ${dynamicSource}\n})()`, {
+    React: runner.React, host: { call: async () => stats(2) },
+  })
+  const ctx = new Context()
+  const slotsFiber = ctx.plugin({ apply(c) { c.provide('slots', slots) } })
+  await slotsFiber
+  const cardFiber = ctx.plugin(plugin)
+  await cardFiber
+  const render = () => runner.render('card', entries.get('self'))
+  render()
+  await tick()
+  assert.match(text(render()), /Hermes Memory/, 'no locale service keeps the card in English')
+  assert.match(text(render()), /MEMORY\.md 2 entries/)
+  const locale = localeService('zh')
+  const localeFiber = ctx.plugin({ apply(c) { c.provide('locale', locale) } })
+  await localeFiber
+  await tick()
+  assert.match(text(render()), /Hermes 记忆/, 'a locale service provided after the plugin is still followed')
+  assert.match(text(render()), /2 条/)
+  locale.switchTo('en')
+  assert.match(text(render()), /Hermes Memory/)
+  assert.equal(locale.listeners.size, 1)
+  await localeFiber.dispose()
+  assert.equal(locale.listeners.size, 0, 'unloading the locale service releases the card subscription')
+  assert.match(text(render()), /Hermes Memory/, 'the last language stays in place without the service')
+  await cardFiber.dispose()
+  await slotsFiber.dispose()
+})
+
 const checkout = process.env.DSH_CLIENT_TEST_CHECKOUT
 test('real DSH: declaration gate, owner reload, plugin unload and CSS cleanup', { skip: !checkout }, async () => {
   const require = createRequire(join(checkout, 'packages/client/ui-renderer/package.json'))
