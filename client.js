@@ -10,29 +10,106 @@ return {
   apply(ctx) {
     const slots = ctx.get('slots')
     if (slots === undefined) return
-    const labels = {
-      unauthorized: 'Your login has expired. Sign in again, then reload this page.',
-      forbidden: 'This account does not have permission. Sign in with an authorized account, then reload this page.',
-      storage_reload_required: 'Storage protection has stopped writes. Stop other writers, inspect both storage files, then reload the plugin.',
-      runtime_reload_required: 'The last write outcome is unknown. Inspect memory and pending changes, then reload the plugin.',
-      storage_unavailable: 'Storage is temporarily unavailable. Retry loading later.',
-      auth_service_unavailable: 'The authentication service is temporarily unavailable. Retry loading later.',
+    // Follow the DSH interface language (optional locale service). Hosts without it keep English.
+    const messages = {
+      en: {
+        'error.unauthorized': 'Your login has expired. Sign in again, then reload this page.',
+        'error.forbidden': 'This account does not have permission. Sign in with an authorized account, then reload this page.',
+        'error.storage_reload_required': 'Storage protection has stopped writes. Stop other writers, inspect both storage files, then reload the plugin.',
+        'error.runtime_reload_required': 'The last write outcome is unknown. Inspect memory and pending changes, then reload the plugin.',
+        'error.storage_unavailable': 'Storage is temporarily unavailable. Retry loading later.',
+        'error.auth_service_unavailable': 'The authentication service is temporarily unavailable. Retry loading later.',
+        errorWithDetail: '{label} ({detail})',
+        invalidStats: 'Invalid memory statistics response',
+        storeNotReady: 'Memory store not ready',
+        storageUnavailable: 'Storage unavailable · writes paused. Retry loading later.',
+        storageBlocked: 'Storage protection triggered · writes paused. Inspect both storage files, then reload the plugin.',
+        storageGuardedNative: 'Native storage protection · writer lease and external change checks enabled.',
+        storageHostJson: 'Host JSON storage · no cross-process writer lock or external change checks. Use one writer per storage directory.',
+        storageUnknown: 'Storage protection status is unavailable from this host. Use one writer per storage directory.',
+        title: '🧠 Hermes Memory',
+        error: 'Error: {error}',
+        loading: 'Loading…',
+        bankCount: ({ icon, file, count, usage }) => `${icon} ${file} ${count} ${count === 1 ? 'entry' : 'entries'} · ${usage}`,
+        recent: 'Recent:',
+        retry: '↻ Retry',
+        refresh: '↻ Refresh',
+      },
+      zh: {
+        'error.unauthorized': '登录已过期，请重新登录后刷新页面。',
+        'error.forbidden': '当前账号没有操作权限，请使用有权限的账号重新登录后刷新页面。',
+        'error.storage_reload_required': '存储保护已停止写入。请停止其他写入并检查两个存储文件，然后重新加载插件。',
+        'error.runtime_reload_required': '上次写入结果不明。请核对记忆和待审记录后重新加载插件。',
+        'error.storage_unavailable': '存储暂不可用，请稍后重试载入。',
+        'error.auth_service_unavailable': '登录验证服务暂不可用，请稍后重试载入。',
+        errorWithDetail: '{label}（{detail}）',
+        invalidStats: '记忆统计响应无效',
+        storeNotReady: '记忆存储尚未就绪',
+        storageUnavailable: '存储暂不可用 · 写入已暂停，请稍后重试载入。',
+        storageBlocked: '存储保护已触发 · 写入已暂停。请检查两个存储文件，然后重新加载插件。',
+        storageGuardedNative: '原生存储保护 · 已启用单写入者租约和外部变更检查。',
+        storageHostJson: '宿主 JSON 存储 · 不提供跨进程写锁或外部变更检查。每个存储目录只使用一个写入者。',
+        storageUnknown: '当前宿主未提供存储保护状态。每个存储目录只使用一个写入者。',
+        title: '🧠 Hermes 记忆',
+        error: '错误：{error}',
+        loading: '载入中…',
+        bankCount: '{icon} {file} {count} 条 · {usage}',
+        recent: '最近：',
+        retry: '↻ 重试',
+        refresh: '↻ 刷新',
+      },
+    }
+    let lang = 'en'
+    const langListeners = new Set()
+    const setLang = next => {
+      if (next === lang) return
+      lang = next
+      for (const fn of langListeners) fn(next)
+    }
+    const hasMessage = key => Object.hasOwn(messages.en, key)
+    const t = (key, params) => {
+      const value = Object.hasOwn(messages[lang], key) ? messages[lang][key] : messages.en[key]
+      if (typeof value === 'function') return value(params || {})
+      if (!params) return value
+      return value.replace(/\{(\w+)\}/g, (match, name) => params[name] === undefined ? match : String(params[name]))
+    }
+    const panelLang = active => typeof active !== 'string' || !active ? undefined : /^zh(?:[-_]|$)/i.test(active) ? 'zh' : 'en'
+    const attachLocale = (locale, effect) => {
+      if (!locale || typeof locale.getLocale !== 'function') return
+      const sync = () => {
+        const next = panelLang(locale.getLocale()?.active)
+        if (next) setLang(next)
+      }
+      sync()
+      if (typeof locale.subscribe === 'function') effect(() => locale.subscribe(sync))
+    }
+    // Optional dependency: not declared in inject, so hosts without a locale service still load the card.
+    if (typeof ctx.inject === 'function') {
+      ctx.inject(['locale'], sub => attachLocale(sub.get('locale'), fn => sub.effect(fn, 'hermes-memory: locale')))
+    } else {
+      attachLocale(ctx.get('locale'), fn => ctx.effect(fn, 'hermes-memory: locale'))
     }
     const blockedSafety = safety => !!safety?.state && safety.state !== 'open'
     const terminal = error => ['unauthorized', 'forbidden', 'storage_reload_required', 'runtime_reload_required'].includes(error?.code)
       || (blockedSafety(error?.storageSafety) && error.storageSafety.state !== 'unavailable')
     const failure = value => {
-      const error = new Error(typeof value?.error === 'string' ? value.error : value?.error?.message || value?.message || 'Memory store not ready')
+      const error = new Error(typeof value?.error === 'string' ? value.error : value?.error?.message || value?.message || t('storeNotReady'))
       error.status = value?.status
       error.code = error.status === 401 ? 'unauthorized' : error.status === 403 ? 'forbidden' : value?.code
       error.storageSafety = value?.storageSafety
       error.retryable = value?.retryable
       return error
     }
-    const describe = error => labels[error?.code] ? `${labels[error.code]} (${error.message})` : String(error?.message || error)
+    const describe = error => typeof error?.code === 'string' && hasMessage(`error.${error.code}`)
+      ? t('errorWithDetail', { label: t(`error.${error.code}`), detail: error.message }) : String(error?.message || error)
     slots.inject('tool.view.cordis', () => slots.register(
       { name: 'tool.view.cordis', key: 'self' },
       () => {
+        const [, setShownLang] = React.useState(lang)
+        React.useEffect(() => {
+          langListeners.add(setShownLang)
+          return () => langListeners.delete(setShownLang)
+        }, [])
         const [stats, setStats] = React.useState(null)
         const [error, setError] = React.useState(null)
         const [safety, setSafety] = React.useState(null)
@@ -51,7 +128,7 @@ return {
           try {
             const value = await host.call('mem-stats', {})
             if (!mounted.current || request !== epoch.current) return
-            if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid memory statistics response')
+            if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(t('invalidStats'))
             observeSafety(value.storageSafety)
             if (value.ready !== true || value.success === false) throw failure(value)
             const validBank = (bank) => bank && Number.isInteger(bank.entries) && bank.entries >= 0 && typeof bank.usage === 'string'
@@ -59,7 +136,7 @@ return {
               || (value.file !== undefined && typeof value.file !== 'string')
               || (value.recent !== undefined && (!Array.isArray(value.recent) || value.recent.some((row) => !row
                 || (row.bank !== 'memory' && row.bank !== 'user') || typeof row.text !== 'string')))) {
-              throw new Error('Invalid memory statistics response')
+              throw new Error(t('invalidStats'))
             }
             if (blockedSafety(value.storageSafety) && value.storageSafety.state !== 'unavailable') {
               const blocked = failure({ ...value, code: 'storage_reload_required' })
@@ -112,26 +189,26 @@ return {
         }
         const mono = { fontFamily: 'monospace', fontSize: 12, opacity: 0.75 }
         const children = [
-          React.createElement('div', { key: 'title', style: { fontWeight: 600 } }, '🧠 Hermes Memory'),
+          React.createElement('div', { key: 'title', style: { fontWeight: 600 } }, t('title')),
         ]
         const storageText = blockedSafety(safety)
-          ? safety.state === 'unavailable' ? 'Storage unavailable · writes paused. Retry loading later.' : 'Storage protection triggered · writes paused. Inspect both storage files, then reload the plugin.'
-          : safety?.mode === 'guarded-native' ? 'Native storage protection · writer lease and external change checks enabled.'
-            : safety?.mode === 'host-json' ? 'Host JSON storage · no cross-process writer lock or external change checks. Use one writer per storage directory.'
-              : 'Storage protection status is unavailable from this host. Use one writer per storage directory.'
+          ? safety.state === 'unavailable' ? t('storageUnavailable') : t('storageBlocked')
+          : safety?.mode === 'guarded-native' ? t('storageGuardedNative')
+            : safety?.mode === 'host-json' ? t('storageHostJson')
+              : t('storageUnknown')
         children.push(React.createElement('div', { key: 'safety', role: 'status', style: { marginTop: 6 } }, storageText,
           safety?.error && React.createElement('div', null, typeof safety.error === 'string' ? safety.error : safety.error.message),
         ))
         if (error) {
-          children.push(React.createElement('div', { key: 'err', role: 'alert', style: { color: '#e5484d' } }, `Error: ${describe(error)}`))
+          children.push(React.createElement('div', { key: 'err', role: 'alert', style: { color: '#e5484d' } }, t('error', { error: describe(error) })))
         }
         if (loading) {
-          children.push(React.createElement('div', { key: 'load', role: 'status', style: { opacity: 0.7 } }, 'Loading…'))
+          children.push(React.createElement('div', { key: 'load', role: 'status', style: { opacity: 0.7 } }, t('loading')))
         }
         if (stats !== null) {
           children.push(React.createElement('div', { key: 'counts', style: row },
-            React.createElement('span', { style: chip }, `📝 MEMORY.md ${stats.memory.entries} entries · ${stats.memory.usage}`),
-            React.createElement('span', { style: chip }, `👤 USER.md ${stats.user.entries} entries · ${stats.user.usage}`),
+            React.createElement('span', { style: chip }, t('bankCount', { icon: '📝', file: 'MEMORY.md', count: stats.memory.entries, usage: stats.memory.usage })),
+            React.createElement('span', { style: chip }, t('bankCount', { icon: '👤', file: 'USER.md', count: stats.user.entries, usage: stats.user.usage })),
           ))
           if (stats.recent && stats.recent.length) {
             const recents = stats.recent.map((r) => React.createElement('div', {
@@ -139,7 +216,7 @@ return {
               style: { wordBreak: 'normal', overflowWrap: 'anywhere', whiteSpace: 'pre-wrap' },
             }, `${r.bank === 'memory' ? '📝' : '👤'} ${r.text}`))
             children.push(React.createElement('div', { key: 'recent', style: { marginTop: 6 } },
-              React.createElement('div', { style: { opacity: 0.7 } }, 'Recent:'),
+              React.createElement('div', { style: { opacity: 0.7 } }, t('recent')),
               ...recents,
             ))
           }
@@ -147,7 +224,7 @@ return {
         }
         if (!terminalFailure.current && error?.retryable !== false) children.push(React.createElement('button', {
           key: 'btn', style: btn, onClick: () => { void load() }, disabled: loading,
-        }, error ? '↻ Retry' : '↻ Refresh'))
+        }, error ? t('retry') : t('refresh')))
         return React.createElement('div', { style: card }, ...children)
       },
     ))
