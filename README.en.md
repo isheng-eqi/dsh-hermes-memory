@@ -9,6 +9,7 @@ An adaptation of [Hermes built-in memory](https://github.com/NousResearch/hermes
 > - By default, a review follows a qualifying response at each multiple of 10 genuine user turns and inherits the triggering turn's model. Each review allows at most 16 additional model requests, with a default model-loop time budget of 120 seconds. These are limits and a budget, not fixed request counts or prices.
 > - To disable independent background review, set `backgroundReview.enabled: false` in the plugin configuration; see the nested YAML example in [Configure background review](#configure-background-review). Main-agent curation and injected memory still consume tokens, so disabling review does not eliminate model usage.
 > - Cost depends on the model, conversation length, and actual request count. The bank character budgets do not cap total tokens or cost; see [Resource boundaries](#resource-boundaries-for-extension-authors).
+> - Each review sends available conversation text up to the triggering turn (user messages, assistant replies, and text from tool results) and saved context from enabled memory banks to the review model.
 
 A review may save grounded, durable facts or decide that nothing is worth saving; the number of entries need not grow over time. Background changes to existing entries and deletions become pending proposals that the owner can approve or discard in the Memory panel.
 
@@ -99,6 +100,8 @@ backgroundReview:
   maxIterations: 4
   timeoutMs: 120000
 ```
+
+If you choose a different provider for review, that provider receives the conversation text and saved memory used for review.
 
 These names are placeholders: replace them with provider and model IDs already configured in DSH. The selected model must support the `memory` tool and its nested arguments; first check curation quality and context capacity with synthetic facts. `maxIterations: 4` is an optional tighter request limit that can end a review early. Total cost still depends on the model, context, and actual request count; savings are not guaranteed.
 
