@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 2.1.0 — 2026-11-27
+
 - Support the current DSH `connection.admit` authentication surface through optional `connection.authentication` injection, alongside the older `connection.requestRejection` path; this fixes panel HTTP routes reporting `auth_service_unavailable` on DSH 0.2.3 without requiring connection services in TUI/headless hosts. The dynamic Host sandbox, which withholds `ctx.inject`, keeps the legacy path.
 - Move the Memory panel from the `sidebar.footer.action` + `shell.overlay` modal to a global `main` panel opened from `sidebar.panellist`. The React slot UI, theme tokens, locale following, row-version CAS, storage-safety handling, and existing entry workflows remain in the client; no iframe page is served.
 - Address [#26](https://github.com/isheng-eqi/dsh-hermes-memory/issues/26): state the typical 1–2 requests per background review next to the 16-request ceiling in both install banners, and document the review record's `status` / `iterations` / `toolCalls` / `writes` / `pending` / `usage` fields plus the correct way to estimate cost from them, instead of publishing price estimates. Thanks to [@kuangmi-bit](https://github.com/kuangmi-bit) for the feedback.

@@ -1,6 +1,6 @@
 {
   "name": "dsh-hermes-memory",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Hermes builtin memory adapted for DeepSeek Harness: bounded dual banks, frozen snapshots, periodic background model review, atomic writes, pinned approvals, and a memory panel.",
   "type": "module",
   "main": "lib/index.js",

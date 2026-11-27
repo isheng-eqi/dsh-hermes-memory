@@ -4,7 +4,7 @@
 
 An adaptation of [Hermes built-in memory](https://github.com/NousResearch/hermes-agent/tree/c0c4357744d1a6994d332b826aea4c77fcccaf38) for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness), with two bounded memory banks, frozen session snapshots, atomic curation, and periodic background review.
 
-> **Before installing — model usage: the v2.0.0 static bundle enables independent background review by default. Reviews make additional LLM requests and consume model quota; paid models may incur additional charges.**
+> **Before installing — model usage: the v2.1.0 static bundle enables independent background review by default. Reviews make additional LLM requests and consume model quota; paid models may incur additional charges.**
 >
 > - By default, a review follows a qualifying response at each multiple of 10 genuine user turns and inherits the triggering turn's model. **In normal operation a review makes 1 additional model request when nothing is worth saving, or 2 when applying a single-bank update**; 16 is the retry and multi-step ceiling, not an expected count, with a default model-loop time budget of 120 seconds. These are limits and a budget, not fixed request counts or prices.
 > - To disable independent background review, set `backgroundReview.enabled: false` in the plugin configuration; see the nested YAML example in [Configure background review](#configure-background-review). Main-agent curation and injected memory still consume tokens, so disabling review does not eliminate model usage.
