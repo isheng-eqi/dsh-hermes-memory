@@ -142,15 +142,15 @@ backgroundReview:
 
 | 字段 | 含义 |
 | --- | --- |
-| `status` | `completed` / `failed` / `interrupted` / `unavailable` |
-| `iterations` / `toolCalls` | 本次复盘的模型轮次与工具调用数 |
-| `writes` / `pending` | 已直接写入的条目数、生成待审提案的条目数 |
+| `status` | 正常完成为 `completed`；失败或提前结束时为 `failed` / `error` / `unavailable` / `aborted` / `interrupted` / `max-iterations` / `max-tokens` |
+| `iterations` / `toolCalls` | 本次复盘的模型请求次数与工具调用数 |
+| `writes` / `pending` | 成功的 `memory` 写入调用数、转为待审提案的调用数；单次调用可包含多个操作 |
 | `usage` | 宿主上报的 `inputTokens` / `outputTokens` / `totalTokens`，只在宿主返回用量时出现 |
 | `error` | 失败原因（截断到 500 字符）；成功时为 `null` |
 
 `usage` 只在宿主适配器上报用量事件时记录。同一会话只保留最近一次复盘记录（`reviews['session:<id>']`），所以这个字段适合看单次量级，**不适合做累计计费对账**；累计口径请在宿主的模型用量账本上取。
 
-用它估算自己成本的正确做法：先跑一段真实回合，取若干条 `usage`，按实际的 `interval` 折算到你自己的回合频率，再乘你的模型单价。本文档不提供单价或金额估算——总费用取决于模型、上下文长度和实际请求次数，记忆库的字符预算也不封顶 token 与费用。
+用它估算自己成本的正确做法：先跑一段真实回合，收集若干会话的最近 `usage` 记录，按实际的 `interval` 折算到你自己的回合频率，再乘你的模型单价。本文档不提供单价或金额估算——总费用取决于模型、上下文长度和实际请求次数，记忆库的字符预算也不封顶 token 与费用。
 
 ### 面向扩展开发者的资源边界
 

@@ -142,15 +142,15 @@ After each review the plugin writes that review's result back into the runtime d
 
 | Field | Meaning |
 | --- | --- |
-| `status` | `completed` / `failed` / `interrupted` / `unavailable` |
-| `iterations` / `toolCalls` | Model turns and tool calls in this review |
-| `writes` / `pending` | Entries written directly, and entries staged as pending proposals |
+| `status` | `completed` on success; `failed` / `error` / `unavailable` / `aborted` / `interrupted` / `max-iterations` / `max-tokens` for failures, cancellation, or limit stops |
+| `iterations` / `toolCalls` | Model requests and tool calls in this review |
+| `writes` / `pending` | Successful `memory` write calls, and calls staged as pending proposals; one call can contain multiple operations |
 | `usage` | Host-reported `inputTokens` / `outputTokens` / `totalTokens`; present only when the host reports usage |
 | `error` | Failure reason (truncated to 500 characters); `null` on success |
 
 `usage` is recorded only when the host adapter reports usage events. One review record is retained per session (`reviews['session:<id>']`), so this field shows the order of magnitude of a single review; it is **not** a cumulative billing ledger — take cumulative figures from the host's own model-usage accounting.
 
-To estimate your own cost: run a stretch of real turns, take a few `usage` records, scale by the real `interval` against your own turn frequency, then apply your model's price. This documentation does not publish per-unit prices or cost estimates: total cost depends on the model, context length and actual request count, and the bank character budgets cap neither tokens nor cost.
+To estimate your own cost: run a stretch of real turns, collect the latest `usage` record from several sessions, scale by the real `interval` against your own turn frequency, then apply your model's price. This documentation does not publish per-unit prices or cost estimates: total cost depends on the model, context length and actual request count, and the bank character budgets cap neither tokens nor cost.
 
 ### Resource boundaries for extension authors
 
