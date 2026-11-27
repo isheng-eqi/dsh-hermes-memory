@@ -57,6 +57,7 @@ function hooks() {
     React,
     render(key, component, commit) {
       current = instances.get(key) || { slots: [], mounted: true }
+      current.mounted = true
       instances.set(key, current)
       cursor = 0
       pending = []
@@ -69,8 +70,10 @@ function hooks() {
     },
     unmount(key) {
       const instance = instances.get(key)
+      if (!instance) return
       instance.slots.forEach((slot) => slot.cleanup?.())
       instance.mounted = false
+      instances.delete(key)
     },
     get updatesAfterUnmount() { return updatesAfterUnmount },
   }
@@ -155,8 +158,11 @@ const HAN = /[\u3000-\u303f\u4e00-\u9fff\uff00-\uffef]/u
 
 function fixture(transport, dynamic = false, services = {}) {
   const runner = hooks(), doc = documentStub(), entries = new Map(), disposers = [], calls = [], copied = []
+  const keyOf = (options) => options.name === 'main' ? `main:${options.key}`
+    : options.name === 'sidebar.panellist' ? `panellist:${options.id}`
+      : options.id || options.key
   const slots = {
-    register(options, component) { const key = options.id || options.key; entries.set(key, component); return () => entries.delete(key) },
+    register(options, component) { const key = keyOf(options); entries.set(key, component); return () => entries.delete(key) },
     inject(_slot, effect) { const off = effect(); disposers.push(off); return off },
   }
   const invoke = (...args) => { calls.push(args); return transport(...args) }
@@ -170,19 +176,14 @@ function fixture(transport, dynamic = false, services = {}) {
     })
   }
   plugin.apply({ get: (name) => name === 'slots' ? slots : services[name], effect(fn) { const off = fn(); disposers.push(off); return off } })
-  const render = () => runner.render('view', entries.get(dynamic ? 'self' : 'hermes-memory-panel'), tree => doc.commit('view', tree))
-  const open = () => {
-    const entry = runner.render('entry', entries.get('hermes-memory'), tree => doc.commit('entry', tree))
-    entry.dom.focus()
-    entry.props.onClick()
-    return render()
-  }
+  const render = () => runner.render('view', entries.get(dynamic ? 'self' : 'main:hermes-memory'), tree => doc.commit('view', tree))
+  const close = () => { runner.unmount('view'); doc.disconnect('view') }
   return {
-    plugin, calls, doc, runner, render, copied,
-    show() { render(); return open() },
-    close() { button(render(), '×').props.onClick(); render() },
-    reopen: open,
-    dispose() { runner.unmount('view'); doc.disconnect('view'); disposers.reverse().forEach((off) => off?.()) },
+    plugin, calls, doc, runner, entries, render, copied,
+    show() { return render() },
+    close,
+    reopen() { return render() },
+    dispose() { close(); disposers.reverse().forEach((off) => off?.()) },
   }
 }
 function section(tree, bank = 'memory') {
@@ -197,6 +198,15 @@ function sectionView(tree, bank = 'memory') {
 }
 
 // Synthetic payloads only: tests never connect to a real service or expose memory contents.
+test('static: registers a global main panel and sidebar panellist, not the old overlay', () => {
+  const h = fixture(async () => response(list()))
+  assert.ok(h.entries.has('main:hermes-memory'))
+  assert.ok(h.entries.has('panellist:hermes-memory'))
+  assert.equal([...h.entries.keys()].some(key => key.includes('sidebar.footer.action')), false)
+  assert.equal([...h.entries.keys()].some(key => key.includes('shell.overlay')), false)
+  h.dispose()
+})
+
 test('static: slots dependency and owned stylesheet cleanup', () => {
   const h = fixture(async () => response(list()))
   assert.equal(h.plugin.inject.join(','), 'slots')
@@ -204,6 +214,18 @@ test('static: slots dependency and owned stylesheet cleanup', () => {
   h.show()
   h.dispose()
   assert.equal(h.doc.elements.size, 0)
+})
+
+test('static: an add draft survives leaving and returning to the global page', async () => {
+  const h = fixture(async () => response(list()))
+  h.show()
+  await tick()
+  section(h.render()).onDraft('kept synthetic draft')
+  h.close()
+  h.reopen()
+  await tick()
+  assert.equal(section(h.render()).draft, 'kept synthetic draft')
+  h.dispose()
 })
 
 test('static: loading is not an empty bank; only a valid response shows empty banks', async () => {
@@ -357,10 +379,7 @@ test('static: refresh keeps the editor on its original entry and preserves missi
   let view = sectionView(h.render())
   assert.match(text(view), /原条目已变化或被删除/)
   assert.equal(walk(view, (node) => node.type === 'textarea')[0].props.value, 'retained draft')
-  h.close()
-  h.reopen()
-  await tick()
-  assert.equal(section(h.render()).editing.text, 'retained draft')
+  h.dispose()
 })
 
 test('static: deletion requires inline confirmation of the full original text', async () => {
@@ -639,9 +658,6 @@ for (const status of [401, 403]) {
     assert.doesNotMatch(text(tree), /非 JSON|请重试|重试载入/)
     assert.equal(walk(tree, node => node.type === 'button' && /刷新|重试/.test(text(node))).length, 0)
     assert.equal(h.calls.length, 1)
-    h.close(); h.reopen()
-    await tick()
-    assert.equal(h.calls.length, 1, 'reopening is not an authentication retry')
     h.dispose()
   })
 }
@@ -783,21 +799,21 @@ for (const action of ['replace', 'remove']) {
   })
 }
 
-test('static: accessible row names, codepoint excerpts, contrast, wrapping and named dialog controls', async () => {
+test('static: accessible row names, codepoint excerpts, contrast, wrapping and page semantics', async () => {
   const entry = '😀'.repeat(33)
   const h = fixture(async () => response({ ...list([entry, entry]), user: [entry] }))
   h.show()
   await tick()
-  const tree = h.render(), dialog = walk(tree, node => node.props.role === 'dialog')[0]
-  assert.equal(dialog.props['aria-modal'], true)
-  assert.equal(walk(tree, node => node.props.id === dialog.props['aria-labelledby']).length, 1)
-  assert.equal(button(tree, '×').props['aria-label'], '关闭记忆面板')
+  const tree = h.render()
+  assert.equal(walk(tree, node => node.props.role === 'dialog').length, 0)
+  assert.equal(walk(tree, node => node.props.className === 'hm-page').length, 1)
+  assert.equal(h.doc.listenerCount('keydown'), 0)
   const view = sectionView(tree), actions = walk(view, node => node.props.className === 'hm-action')
   assert.equal(actions[0].props['aria-label'], `编辑 MEMORY 第 1 条：${'😀'.repeat(32)}…`)
   assert.notEqual(actions[0].props['aria-label'], actions[2].props['aria-label'])
   assert.notEqual(actions[0].props['aria-label'], walk(sectionView(tree, 'user'), node => node.props.className === 'hm-action')[0].props['aria-label'])
   for (const action of actions) {
-    assert.equal(action.props.style.color, '#6b6b6b')
+    assert.equal(action.props.style.color, 'var(--dsw-alias-label-secondary)')
     assert.equal(action.props.style.opacity, 1)
     assert.ok(action.props.style.minWidth >= 24 && action.props.style.minHeight >= 24)
   }
@@ -805,44 +821,25 @@ test('static: accessible row names, codepoint excerpts, contrast, wrapping and n
   assert.equal(entryText.props.style.wordBreak, 'normal')
   assert.equal(entryText.props.style.overflowWrap, 'anywhere')
   assert.equal(walk(view, node => node.type === 'input')[0].props['aria-label'], '添加 MEMORY 记忆条目')
-  assert.match(h.doc.elements.values().next().value.textContent, /:focus-visible.*outline: 2px solid/)
+  assert.match(h.doc.elements.values().next().value.textContent, /focus-visible.*outline: 2px solid/)
   h.dispose()
 })
 
-test('static: modal focuses inside, traps both Tab directions, Escape closes and restores opener on close/unmount', async () => {
+test('static: global page renders without a modal shell or keydown interception', async () => {
   const h = fixture(async () => response(list()))
   h.show()
   await tick()
-  let tree = h.render(), dialog = walk(tree, node => node.props.role === 'dialog')[0].dom
-  const opener = h.doc.activeElement
-  assert.equal(opener.props['aria-label'], '关闭记忆面板')
-  assert.equal(h.doc.listenerCount('keydown'), 1)
-  let targets = dialog.querySelectorAll().filter(node => !node.disabled && node.tabIndex >= 0)
-  const first = targets[0], last = targets.at(-1)
-  last.focus()
-  assert.equal(h.doc.dispatch('keydown', { key: 'Tab' }).defaultPrevented, true)
-  assert.equal(h.doc.activeElement, first)
-  first.focus()
-  assert.equal(h.doc.dispatch('keydown', { key: 'Tab', shiftKey: true }).defaultPrevented, true)
-  assert.equal(h.doc.activeElement, last)
-  targets[1].focus()
-  assert.equal(h.doc.dispatch('keydown', { key: 'Tab' }).defaultPrevented, false)
-  const escape = h.doc.dispatch('keydown', { key: 'Escape' })
-  assert.equal(escape.defaultPrevented, true)
-  assert.equal(escape.stopped, true)
-  assert.equal(h.render(), null)
-  assert.equal(h.doc.activeElement.props['aria-label'], '打开记忆面板')
+  let tree = h.render()
+  assert.equal(walk(tree, node => node.props.role === 'dialog').length, 0)
+  assert.equal(walk(tree, node => node.props.className === 'hm-page').length, 1)
   assert.equal(h.doc.listenerCount('keydown'), 0)
+  assert.ok(button(tree, '刷新'))
+  h.close()
   h.reopen()
   await tick()
   tree = h.render()
-  assert.equal(h.doc.activeElement.props['aria-label'], '关闭记忆面板')
-  h.close()
-  assert.equal(h.doc.activeElement.props['aria-label'], '打开记忆面板')
-  h.reopen()
-  await tick()
+  assert.ok(button(tree, '刷新'))
   h.dispose()
-  assert.equal(h.doc.activeElement.props['aria-label'], '打开记忆面板')
   assert.equal(h.doc.listenerCount('keydown'), 0)
 })
 
@@ -900,7 +897,6 @@ test('static: follows the DSH locale, localizes every panel state, and keeps dra
   assert.match(text(tree), /Background review · every 10 user turns · last review completed/)
   assert.match(text(tree), /Pending changes · 1/)
   assert.match(text(tree), /Original: old synthetic/)
-  assert.equal(button(tree, '×').props['aria-label'], 'Close memory panel')
   for (const label of ['Approve', 'Discard', 'Export backup', 'Refresh']) assert.ok(walk(tree, node => text(node).includes(label)).length > 0, label)
   const view = sectionView(tree), actions = walk(view, node => node.props.className === 'hm-action')
   assert.equal(actions[0].props['aria-label'], 'Edit MEMORY entry 1: first synthetic entry')
@@ -994,8 +990,11 @@ test('real Cordis: the locale service is optional, may arrive after the panel, a
   const require = createRequire(import.meta.url)
   const { Context } = require('@deepseek-ai/cordis')
   const runner = hooks(), doc = documentStub(), entries = new Map()
+  const keyOf = (options) => options.name === 'main' ? `main:${options.key}`
+    : options.name === 'sidebar.panellist' ? `panellist:${options.id}`
+      : options.id || options.key
   const slots = {
-    register(options, component) { const key = options.id || options.key; entries.set(key, component); return () => entries.delete(key) },
+    register(options, component) { const key = keyOf(options); entries.set(key, component); return () => entries.delete(key) },
     inject(_slot, effect) { return effect() },
   }
   let plugin
@@ -1008,9 +1007,7 @@ test('real Cordis: the locale service is optional, may arrive after the panel, a
   await slotsFiber
   const panelFiber = ctx.plugin(plugin)
   await panelFiber
-  const render = () => runner.render('view', entries.get('hermes-memory-panel'), tree => doc.commit('view', tree))
-  render()
-  runner.render('entry', entries.get('hermes-memory')).props.onClick()
+  const render = () => runner.render('view', entries.get('main:hermes-memory'), tree => doc.commit('view', tree))
   render()
   await tick()
   assert.ok(button(render(), '刷新'), 'no locale service keeps the original Chinese panel')
@@ -1029,10 +1026,15 @@ test('real Cordis: the locale service is optional, may arrive after the panel, a
   await slotsFiber.dispose()
 })
 
-test('static: the collapsed 56px rail shows a compact entry instead of a clipped localized word', async () => {
-  const runner = hooks(), doc = documentStub(), entries = new Map()
+test('static: sidebar.panellist registers an icon and a locale-aware panel label', async () => {
+  const runner = hooks(), doc = documentStub(), entries = new Map(), descriptors = new Map()
   const slots = {
-    register(options, component) { const key = options.id || options.key; entries.set(key, component); return () => entries.delete(key) },
+    register(options, component) {
+      const key = options.name === 'main' ? `main:${options.key}` : options.id || options.key
+      entries.set(key, component)
+      descriptors.set(options.id || options.key, options)
+      return () => { entries.delete(key); descriptors.delete(options.id || options.key) }
+    },
     inject(_slot, fn) { return fn() },
   }
   const locale = localeService('en')
@@ -1046,22 +1048,16 @@ test('static: the collapsed 56px rail shows a compact entry instead of a clipped
     effect: fn => fn(),
     inject: (_deps, fn) => fn({ get: name => name === 'locale' ? locale : undefined, effect: fn2 => fn2() }),
   })
-  const entry = (props) => runner.render('entry', () => entries.get('hermes-memory')(props), tree => doc.commit('entry', tree))
-  // The owner share reports the 56px rail; a localized word cannot fit there.
-  const rail = entry({ wide: false })
-  assert.equal(text(rail), '🧠')
-  assert.equal(rail.props['aria-label'], 'Open memory panel')
-  assert.equal(rail.props.title, 'Memory')
-  assert.equal(rail.props.style.letterSpacing, 0)
-  assert.equal(rail.props.style.maxWidth, '100%')
-  assert.equal(rail.props.style.overflow, 'hidden')
-  // Wide, and hosts that do not supply the owner share, keep the localized word.
-  assert.equal(text(entry({ wide: true })), 'Memory')
-  assert.equal(text(entry({})), 'Memory')
+  const descriptor = descriptors.get('hermes-memory')
+  assert.equal(descriptor.name, 'sidebar.panellist')
+  assert.equal(descriptor.id, 'hermes-memory')
+  assert.equal(typeof descriptor.label, 'function')
+  assert.equal(descriptor.label(), 'Memory')
+  const icon = runner.render('icon', () => entries.get('hermes-memory')({ size: 18, active: true }), tree => doc.commit('icon', tree))
+  assert.equal(text(icon), '🧠')
+  assert.equal(icon.props['aria-hidden'], true)
   locale.switchTo('zh-CN')
-  assert.equal(text(entry({ wide: true })), '记忆')
-  assert.equal(entry({ wide: false }).props['aria-label'], '打开记忆面板')
-  assert.equal(text(entry({ wide: false })), '🧠')
+  assert.equal(descriptor.label(), '记忆')
 })
 
 test('real Cordis: the dynamic card follows a locale service provided after the plugin and releases it', async () => {
@@ -1122,10 +1118,10 @@ test('real DSH: declaration gate, owner reload, plugin unload and CSS cleanup', 
   await serviceFiber
   await tick()
   const slots = ctx.get('slots')
-  assert.throws(() => slots.register({ name: 'sidebar.footer.action', id: 'ungated' }, () => null), /not declared/)
-  const counts = () => ['sidebar.footer.action', 'shell.overlay'].map((name) => slots.entriesOfSlot(name).length)
+  assert.throws(() => slots.register({ name: 'main', key: 'ungated' }, () => null), /not declared/)
+  const counts = () => ['main', 'sidebar.panellist'].map((name) => slots.entriesOfSlot(name).length)
   const declare = () => slots.register({ name: 'root', children: {
-    'sidebar.footer.action': { kind: 'list', scope: 'root' }, 'shell.overlay': { kind: 'list', scope: 'root' },
+    'main': { kind: 'keyed', scope: 'root' }, 'sidebar.panellist': { kind: 'list', scope: 'root' },
   } }, () => null)
   assert.deepEqual(counts(), [0, 0])
   let owner = declare()

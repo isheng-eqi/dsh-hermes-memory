@@ -16,7 +16,7 @@ The implementation is based on Hermes commit `c0c4357744d1a6994d332b826aea4c77fc
 
 ## Install and use
 
-Install or enable the bundle in the DSH plugin manager, refresh the existing DSH page, and click **记忆** (Memory) at the bottom of the sidebar. A source installation uses the package directory. For the published package:
+Install or enable the bundle in the DSH plugin manager, refresh the existing DSH page, and click **记忆** (Memory) in the sidebar navigation. A source installation uses the package directory. For the published package:
 
 ```sh
 dsh plugin --profile web add dsh-hermes-memory
@@ -24,17 +24,17 @@ dsh plugin --profile web add dsh-hermes-memory
 
 The plugin requires `tools`, `timer`, `sessionProjections`, and a JSON storage backend. The Web profile already includes the storage components; do not declare duplicate storage rows. If storage is unavailable, the plugin returns an error instead of replacing existing data with an empty store.
 
-The implementation verification record covers DSH `0.2.2-alpha.2`, Node `24.22.2`, and the current v4 session format. The package's peer dependency ranges do not guarantee runtime compatibility with every matching version.
+Verified in an isolated Web profile with DSH `0.2.3-alpha.2` and Node `24.22.2`: the global panel loaded and a memory entry was added. The earlier v2.0.0 `0.2.2-alpha.2` verification record remains in the [implementation and verification record](docs/2026-11-11_hermes-memory-implementation-report.md). The package's peer dependency ranges do not guarantee runtime compatibility with every matching version.
 
-![Memory panel showing synthetic offline entries, storage status, and row actions](docs/panel.png)
+![Memory global panel showing synthetic offline entries, storage status, and row actions](docs/panel.png)
 
-The panel follows the interface language selected in DSH settings: Chinese locales (zh, zh-CN, zh-TW, …) show Simplified Chinese and every other language shows English, matching DSH's own English fallback. Hosts without the locale service keep the Simplified Chinese panel. The dynamic statistics card follows the same setting and stays in English without it. Error details returned by the server are shown verbatim. The panel supports Escape to close, trapped Tab navigation, focus restoration to its opener, and entry-specific accessible action names.
+The Memory page is a DSH global main panel rather than a full-screen overlay, so Escape, Tab, and page switching remain owned by the DSH shell. It follows the interface language selected in DSH settings: Chinese locales (zh, zh-CN, zh-TW, …) show Simplified Chinese and every other language shows English, matching DSH's own English fallback. Hosts without the locale service keep the Simplified Chinese panel. The dynamic statistics card follows the same setting and stays in English without it. Error details returned by the server are shown verbatim, and entry actions have entry-specific accessible names.
 
 ### Observe automatic memory
 
 1. State a durable fact during a normal conversation, such as “Use Chinese for all future conversations.” A one-off task requirement does not automatically become a lasting preference.
 2. The main model can save memory at any time. By default, background review also runs when the genuine user-turn count reaches a multiple of 10 and that turn completes normally. Tool calls and automatic continuation messages do not advance the user-turn count.
-3. Refresh the Memory panel to inspect background status, both banks, and pending changes. By default, background additions can be saved directly (when `writeApproval: true` is enabled, background additions are also staged as pending proposals); changes to existing entries and deletions always require approval.
+3. Open the Memory page from the sidebar navigation and refresh it to inspect background status, both banks, and pending changes. By default, background additions can be saved directly (when `writeApproval: true` is enabled, background additions are also staged as pending proposals); changes to existing entries and deletions always require approval.
 4. The current session retains the frozen snapshot captured on its first read. New sessions receive updated memory. Use `memory_list` to read the current store during an existing session.
 
 A turn counts at most one genuine user message. A review also requires a genuine user message in the triggering turn, successful turn completion, and a nonempty final text response without tool calls. Cancelled or failed turns, empty responses, and responses with unfinished tool calls do not trigger review; any genuine user message already received in those turns still counts toward the interval. Ordinary subagents do not trigger automatic review. Only one review runs per session at a time; later triggers encountered while it is running are skipped rather than queued for replay.

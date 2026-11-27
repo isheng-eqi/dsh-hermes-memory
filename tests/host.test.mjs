@@ -54,7 +54,7 @@ async function mount(t, mode, options = {}) {
   }
   const services = { llm: options.llm,
     storage: { backend: { get: () => backend } },
-    connection: { requestRejection: request => request.headers.origin === 'https://foreign.invalid' ? 403 : request.headers.cookie === 'owner=yes' ? undefined : 401 },
+    connection: options.connection || { requestRejection: request => request.headers.origin === 'https://foreign.invalid' ? 403 : request.headers.cookie === 'owner=yes' ? undefined : 401 },
     sessions: options.sessions,
     webServer: { register(route) { routes.set(route.path, route); return () => routes.delete(route.path) } },
   }
@@ -261,6 +261,19 @@ for (const mode of ['static', 'dynamic']) {
     assert.equal((await h.request('/hermes-memory/ops')).status, 200)
     delete h.services.connection
     assert.equal((await h.request('/hermes-memory/ops')).status, 503)
+  })
+
+  test(`${mode}: HTTP routes support the current connection.admit admission API`, async t => {
+    const h = await mount(t, mode, {
+      connection: {
+        admit: request => request.headers.origin === 'https://foreign.invalid'
+          ? { rejection: 403 }
+          : request.headers.cookie === 'owner=yes' ? { peer: {} } : { rejection: 401 },
+      },
+    })
+    assert.equal((await h.request('/hermes-memory/ops', { auth: false })).status, 401)
+    assert.equal((await h.request('/hermes-memory/ops', { origin: 'https://foreign.invalid' })).status, 403)
+    assert.equal((await h.request('/hermes-memory/ops')).status, 200)
   })
 
   test(`${mode}: panel API returns stable codes and storage safety on success and business errors`, async t => {
