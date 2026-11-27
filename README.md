@@ -24,9 +24,9 @@ dsh plugin --profile web add dsh-hermes-memory
 
 插件需要 `tools`、`timer`、`sessionProjections` 及 JSON storage backend。Web profile 已带存储组件，不应重复声明它们。缺少存储时返回错误，不会把旧数据当空库覆盖。
 
-已在 DSH `0.2.2-alpha.2`、Node `24.22.2` 的当前 v4 会话格式验证。包的 peer 范围不是运行兼容性保证。
+已在 DSH `0.2.3-alpha.2`、Node `24.22.2` 的隔离 Web profile 中验证全局面板加载与记忆条目新增；此前 v2.0.0 的 `0.2.2-alpha.2` 验证记录见 [实现与验证记录](docs/2026-11-11_hermes-memory-implementation-report.md)。包的 peer 范围不是运行兼容性保证。
 
-![记忆面板，使用离线合成条目展示双库、存储状态和操作按钮](docs/panel.png)
+![记忆全局主面板，使用离线合成条目展示双库、存储状态和操作按钮](docs/panel.png)
 
 「记忆」作为 DSH 的全局主面板打开，不再是覆盖整个界面的浮层；因此 Esc、Tab 和页面切换由 DSH 外壳负责。面板跟随 DSH 设置中的界面语言：中文语言（zh、zh-CN、zh-TW 等）显示简体中文，其他语言显示英文，与 DSH 自身回退到英文的规则一致；宿主未提供 locale 服务时保持简体中文。动态统计卡片同样跟随该设置，未提供时保持英文。服务器返回的错误详情按原文显示，条目按钮有各自的无障碍名称。
 

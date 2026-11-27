@@ -24,9 +24,9 @@ dsh plugin --profile web add dsh-hermes-memory
 
 The plugin requires `tools`, `timer`, `sessionProjections`, and a JSON storage backend. The Web profile already includes the storage components; do not declare duplicate storage rows. If storage is unavailable, the plugin returns an error instead of replacing existing data with an empty store.
 
-The implementation verification record covers DSH `0.2.2-alpha.2`, Node `24.22.2`, and the current v4 session format. The package's peer dependency ranges do not guarantee runtime compatibility with every matching version.
+Verified in an isolated Web profile with DSH `0.2.3-alpha.2` and Node `24.22.2`: the global panel loaded and a memory entry was added. The earlier v2.0.0 `0.2.2-alpha.2` verification record remains in the [implementation and verification record](docs/2026-11-11_hermes-memory-implementation-report.md). The package's peer dependency ranges do not guarantee runtime compatibility with every matching version.
 
-![Memory panel showing synthetic offline entries, storage status, and row actions](docs/panel.png)
+![Memory global panel showing synthetic offline entries, storage status, and row actions](docs/panel.png)
 
 The Memory page is a DSH global main panel rather than a full-screen overlay, so Escape, Tab, and page switching remain owned by the DSH shell. It follows the interface language selected in DSH settings: Chinese locales (zh, zh-CN, zh-TW, …) show Simplified Chinese and every other language shows English, matching DSH's own English fallback. Hosts without the locale service keep the Simplified Chinese panel. The dynamic statistics card follows the same setting and stays in English without it. Error details returned by the server are shown verbatim, and entry actions have entry-specific accessible names.
 
