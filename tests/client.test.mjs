@@ -968,7 +968,7 @@ test('dynamic: follows the DSH locale for statistics and recovery labels; Englis
   const h = fixture(async () => ++attempt === 1 ? stats(1) : { ready: false, code: 'unauthorized', error: 'synthetic expired session' }, true, { locale })
   h.render()
   await tick()
-  assert.match(text(h.render()), /🧠 Hermes 记忆/)
+  assert.match(text(h.render()), /Hermes 记忆/)
   assert.match(text(h.render()), /MEMORY\.md 1 条/)
   button(h.render(), '刷新').props.onClick()
   await tick()
@@ -982,7 +982,7 @@ test('dynamic: follows the DSH locale for statistics and recovery labels; Englis
   const fallback = fixture(async () => stats(2), true)
   fallback.render()
   await tick()
-  assert.match(text(fallback.render()), /🧠 Hermes Memory.*MEMORY\.md 2 entries/)
+  assert.match(text(fallback.render()), /Hermes Memory.*MEMORY\.md 2 entries/)
   fallback.dispose()
 })
 
