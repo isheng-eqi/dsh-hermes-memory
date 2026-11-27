@@ -6,7 +6,7 @@ An adaptation of [Hermes built-in memory](https://github.com/NousResearch/hermes
 
 > **Before installing — model usage: the v2.0.0 static bundle enables independent background review by default. Reviews make additional LLM requests and consume model quota; paid models may incur additional charges.**
 >
-> - By default, a review follows a qualifying response at each multiple of 10 genuine user turns and inherits the triggering turn's model. Each review allows at most 16 additional model requests, with a default model-loop time budget of 120 seconds. These are limits and a budget, not fixed request counts or prices.
+> - By default, a review follows a qualifying response at each multiple of 10 genuine user turns and inherits the triggering turn's model. **In normal operation a review makes 1 additional model request when nothing is worth saving, or 2 when applying a single-bank update**; 16 is the retry and multi-step ceiling, not an expected count, with a default model-loop time budget of 120 seconds. These are limits and a budget, not fixed request counts or prices.
 > - To disable independent background review, set `backgroundReview.enabled: false` in the plugin configuration; see the nested YAML example in [Configure background review](#configure-background-review). Main-agent curation and injected memory still consume tokens, so disabling review does not eliminate model usage.
 > - Cost depends on the model, conversation length, and actual request count. The bank character budgets do not cap total tokens or cost; see [Resource boundaries](#resource-boundaries-for-extension-authors).
 
@@ -135,6 +135,22 @@ backgroundReview:
 When a different provider or model is selected, the previous model's reasoning effort and output token limit are not imposed on it; the target adapter's defaults apply. The 16-request limit bounds the plugin's model loop. Internal network retries in the host or model adapter are controlled by their own settings and are not counted by this loop. Each review sends the conversation text captured at the trigger and the currently enabled memory banks. Token usage and cost depend on context length, model, and the actual number of requests.
 
 A background error does not fail normal chat. Failure status remains visible. The same claimed trigger is not automatically replayed after reload; a later interval can try again. A successful earlier write is not rolled back if a later review request fails.
+
+### Inspect background review usage
+
+After each review the plugin writes that review's result back into the runtime data (the same storage unit as the memory banks, under `reviews`), including the usage the host reported and the tool-call count:
+
+| Field | Meaning |
+| --- | --- |
+| `status` | `completed` on success; `failed` / `error` / `unavailable` / `aborted` / `interrupted` / `max-iterations` / `max-tokens` for failures, cancellation, or limit stops |
+| `iterations` / `toolCalls` | Model requests and tool calls in this review |
+| `writes` / `pending` | Successful `memory` write calls, and calls staged as pending proposals; one call can contain multiple operations |
+| `usage` | Host-reported `inputTokens` / `outputTokens` / `totalTokens`; present only when the host reports usage |
+| `error` | Failure reason (truncated to 500 characters); `null` on success |
+
+`usage` is recorded only when the host adapter reports usage events. One review record is retained per session (`reviews['session:<id>']`), so this field shows the order of magnitude of a single review; it is **not** a cumulative billing ledger — take cumulative figures from the host's own model-usage accounting.
+
+To estimate your own cost: run a stretch of real turns, collect the latest `usage` record from several sessions, scale by the real `interval` against your own turn frequency, then apply your model's price. This documentation does not publish per-unit prices or cost estimates: total cost depends on the model, context length and actual request count, and the bank character budgets cap neither tokens nor cost.
 
 ### Resource boundaries for extension authors
 
